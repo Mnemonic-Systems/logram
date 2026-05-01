@@ -147,8 +147,13 @@ class InvoicePipeline:
 ```bash
 logram inspect                    # list recent runs
 logram inspect <run_id>           # detailed step tree for a run
+logram inspect last               # inspect the most recent run
 logram diff <run_a> <run_b>       # what changed: source, globals, callees, I/O
+logram diff last                  # diff last run vs previous (same input)
+logram diff --ss                  # diff last run vs last SUCCESS (same input)
 logram recover <logic_hash>       # exact code + prompts that ran
+logram doctor                     # environment health check
+logram live                       # real-time run dashboard
 ```
 
 #### Golden regression tests
@@ -570,11 +575,15 @@ The CLI prints a pre-run banner showing which steps are forced live, invalidates
 
 ```bash
 logram diff run_20260425_142211 run_20260425_150033          # full diff
+logram diff last                                             # last run vs previous (same input_id)
+logram diff --ss                                             # last run vs last SUCCESS (same input_id)
 logram diff <run_a> <run_b> --code                           # source code only
 logram diff <run_a> <run_b> --globals                        # prompts and constants only
 logram diff <run_a> <run_b> --inputs                         # runtime inputs only
 logram diff <run_a> <run_b> --outputs                        # runtime outputs only
 ```
+
+**`lg diff last`** automatically finds the previous run for the same `input_id`, so you always compare apples to apples. **`lg diff --ss`** compares the most recent run against the most recent SUCCESS for the same input — the fastest way to pinpoint what broke.
 
 Example output for a prompt change buried in a callee:
 ```text
@@ -602,7 +611,15 @@ logram list --group-by-input         # group by document/input_id
 logram list --copy-field run_id --copy-index 1   # copy first run_id to clipboard
 ```
 
-**`logram inspect <run_id>`** — Render the full execution tree of a run as a Rich tree, with per-step status badges, durations (color-coded: fast / slow), and a footer showing total live time vs. replayed steps.
+**`logram inspect <run_id>`** — Render the full execution tree of a run as a Rich tree, with per-step status badges, durations (color-coded: fast / slow), and a footer showing total live time vs. replayed steps. All commands that accept a `run_id` also accept smart shorthands — no copy-pasting long IDs required:
+
+```bash
+logram inspect last          # most recent run
+logram inspect last-failed   # most recent failed run (alias: fail)
+logram inspect -1            # most recent  (-2 = second-to-last, -3 = third…)
+```
+
+Tab-completion (`logram --install-completion`) fills in real run IDs from the DB alongside the shorthands.
 ```text
 my_agent  ·  2026-04-25 14:22:11  ·  success
 
@@ -705,7 +722,7 @@ logram mcp config
 </details>
 
 <details>
-<summary><b>🧹 Maintenance & UI (clean, open, ui)</b></summary>
+<summary><b>🧹 Maintenance & UI (clean, open, ui, doctor, live)</b></summary>
 
 **`logram clean`** — Interactive cleanup wizard. Lists failed runs and orphan blob assets (files in `.logram_assets/` not referenced by any step output), then prompts before deleting anything.
 
@@ -716,6 +733,31 @@ logram mcp config
 logram ui                              # http://127.0.0.1:8000, opens browser
 logram ui --port 9000 --no-open-browser
 ```
+
+**`logram doctor`** — Environment health check. Produces an 8-row status table covering Python version, Logram SDK installation, `.logram/` directory and database, MCP wiring for Claude Code, Claude Desktop, and Cursor, and a cleanup summary (failed runs + orphan blobs). Run this first when something seems off.
+
+```text
+logram doctor
+
+  check                status     detail
+  Python               ✓ ok       3.12.3
+  Logram SDK           ✓ ok       0.3.0
+  .logram/             ✓ ok       /path/to/.logram
+  logram.db            ✓ ok       142 KB · 12 run(s)
+  Claude Code MCP      ✓ ok       logram found in ~/.claude.json
+  Claude Desktop MCP   – n/a      not supported on this platform
+  Cursor MCP           ⚠ warn     found mcp.json but logram not wired
+  Cleanup              ⚠ warn     3 failed run(s) · 1 orphan blob(s)
+```
+
+**`logram live`** — Real-time terminal dashboard. Polls the database every 500ms and renders a live-updating step tree with a spinner during active runs, or "Waiting for new run…" when idle. Start it in a split terminal while running your pipeline.
+
+```bash
+logram live                  # default 500ms polling
+logram live --interval 250   # faster polling (min 100ms)
+```
+
+Press `Ctrl-C` to exit cleanly.
 </details>
 
 ---
@@ -725,17 +767,21 @@ logram ui --port 9000 --no-open-browser
 | Command | Description |
 |---|---|
 | `logram list` | List all runs with status, duration, relative time |
-| `logram inspect <run_id>` | Step execution tree with status badges |
+| `logram inspect <run_id>` | Step execution tree with status badges (accepts `last`, `last-failed`, `-1`, `-2`…) |
 | `logram view <step_id>` | Full step detail: inputs, output, error, blobs |
 | `logram recover <logic_hash>` | Runtime source code + globals for any logic hash |
 | `logram replay <script.py>` | Time-travel replay (`--force`, `--from`) |
 | `logram diff <run_a> <run_b>` | Full diff: code, globals, inputs, outputs (`--code`, `--globals`, `--inputs`, `--outputs`) |
+| `logram diff last` | Diff last run vs previous run (same `input_id`) |
+| `logram diff --ss` | Diff last run vs last SUCCESS (same `input_id`) |
 | `logram golden add <run_id>` | Tag a run as a GOLDEN regression baseline |
 | `logram test <script.py>` | Regression test against all GOLDEN inputs |
 | `logram restore <run_id>` | Print copy-pasteable code blocks to revert a run |
 | `logram stats` | ROI dashboard: time saved, token bypass rate, financial gain |
 | `logram open <step_id>` | Open a step's image blob in system viewer |
 | `logram clean` | Interactive cleanup of failed runs and orphan assets |
+| `logram doctor` | Environment health check: Python, DB, MCP wiring, orphan blobs |
+| `logram live` | Real-time step-tree dashboard, polls every 500ms (`--interval` to adjust) |
 | `logram ui` | Launch local web dashboard API server |
 | `logram mcp start` | Launch MCP server (stdio) for agent integration |
 | `logram mcp config` | Print MCP config JSON for Cursor / Claude Desktop |
