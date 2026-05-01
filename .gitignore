@@ -1,0 +1,73 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+*.pyo
+.python-version
+pip-log.txt
+pip-delete-this-directory.txt
+*.egg-info/
+.eggs/
+dist/
+build/
+MANIFEST
+
+# --- Virtual Environments ---
+.venv/
+venv/
+env/
+bin/
+lib/
+include/
+.env
+.venv*
+
+# --- SQLite & Databases (Logram Runtime Data) ---
+# We ignore the directories and all potential database files
+.logram/
+.logram_assets/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# --- Next.js / Node.js Dashboard ---
+client/node_modules/
+client/.next/
+client/out/
+client/.env*
+client/npm-debug.log*
+client/yarn-debug.log*
+client/yarn-error.log*
+client/.turbo/
+
+# --- IDE & System ---
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# --- Tests & Coverage ---
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+nosetests.xml
+coverage.xml
+*.cover
+
+
+# --- Tooling ---
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/

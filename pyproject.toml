@@ -1,0 +1,33 @@
+[build-system]
+# On utilise flit_core : c'est le moteur le plus fiable et le plus rapide 
+# pour les projets purement Python (sans C).
+requires = ["flit_core >=3.2,<4"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "logram-sdk"
+version = "0.3.0"
+description = "Iteration Infrastructure for AI Agents"
+authors = [{name = "Idriss El khamlichi"}]
+readme = "README.md"
+requires-python = ">=3.10"
+# Dépendances minimales et stables
+dependencies = [
+    "typer>=0.9.0",
+    "rich>=13.0.0",
+    "pydantic>=2.0.0",
+    "fastapi>=0.120.0",
+    "uvicorn>=0.30.0",
+    "aiosqlite>=0.21.0",
+    "fastmcp>=2.0.0",
+]
+
+[project.scripts]
+logram = "logram.cli:app"
+lg = "logram.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/Idriss20032003/Logram-sdk"
+
+[tool.flit.module]
+name = "logram"
