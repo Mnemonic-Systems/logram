@@ -44,6 +44,15 @@ APP_NAME = "Logram Control Center"
 DB_PATH = Path(".logram") / "logram.db"
 ASSETS_DIR = Path(".logram_assets")
 
+_TEMPLATES_DIR = Path(__file__).parent / "templates"
+_AGENT_RULES_FILES: list[tuple[str, str]] = [
+    # (template filename,  destination filename in user project)
+    ("LOGRAM_AGENT_RULES.md", "LOGRAM_AGENT_RULES.md"),
+    ("cursorrules",           ".cursorrules"),
+    ("CLAUDE.md",             "CLAUDE.md"),
+]
+_GITIGNORE_ENTRIES = [".logram/", ".logram_assets/"]
+
 app = typer.Typer(
     name="logram",
     help="CLI Logram: inspection, time-machine, qualité et maintenance.",
@@ -2146,6 +2155,112 @@ def mcp_config(
 
 
 # ---------------------------------------------------------------------------
+# Agent rules helpers
+# ---------------------------------------------------------------------------
+
+
+def _write_agent_rules_files(cwd: Path, *, force: bool = False) -> list[tuple[str, str]]:
+    """Write bundled agent rules files to cwd. Returns list of (dest_name, status)."""
+    results: list[tuple[str, str]] = []
+    for template_name, dest_name in _AGENT_RULES_FILES:
+        template = _TEMPLATES_DIR / template_name
+        dest = cwd / dest_name
+        if not template.exists():
+            results.append((dest_name, "template missing"))
+            continue
+        if not force and dest.exists():
+            results.append((dest_name, "skipped (exists)"))
+            continue
+        try:
+            dest.write_text(template.read_text(encoding="utf-8"), encoding="utf-8")
+            results.append((dest_name, "written"))
+        except Exception as exc:
+            results.append((dest_name, f"error: {exc}"))
+    return results
+
+
+def _update_gitignore(cwd: Path) -> str:
+    """Ensure Logram entries are in .gitignore. Returns a brief status string."""
+    gitignore = cwd / ".gitignore"
+    try:
+        existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
+        missing = [e for e in _GITIGNORE_ENTRIES if e not in existing]
+        if not missing:
+            return "up to date"
+        block = "\n# Logram local trace store (DO NOT COMMIT)\n" + "\n".join(missing) + "\n"
+        with gitignore.open("a", encoding="utf-8") as f:
+            f.write(block)
+        return "added " + "  ".join(missing)
+    except Exception as exc:
+        return f"error: {exc}"
+
+
+# ---------------------------------------------------------------------------
+# lg init
+# ---------------------------------------------------------------------------
+
+
+@app.command("init")
+def init_project(
+    force: bool = typer.Option(False, "--force", "-f", help="Overwrite existing agent rules files."),
+) -> None:
+    """Bootstrap Logram in the current project: write agent rules files and update .gitignore."""
+    cwd = Path.cwd()
+    console.print()
+
+    rules_results = _write_agent_rules_files(cwd, force=force)
+    gi_status = _update_gitignore(cwd)
+
+    report = Table(
+        box=TABLE_BOX,
+        show_edge=False,
+        show_lines=False,
+        expand=False,
+        pad_edge=False,
+        header_style="lg.header",
+    )
+    report.add_column("file", style="lg.brand")
+    report.add_column("status", justify="left")
+
+    for dest_name, status in rules_results:
+        if "written" in status:
+            badge = Text(" ✓ written ", style="lg.badge.success")
+        elif "skipped" in status:
+            badge = Text(" – exists  ", style="lg.muted")
+        else:
+            badge = Text(f" ✗ {status} ", style="lg.badge.failed")
+        report.add_row(dest_name, badge)
+
+    if "error" in gi_status:
+        gi_badge = Text(f" ✗ {gi_status} ", style="lg.badge.failed")
+    elif "up to date" in gi_status:
+        gi_badge = Text(" – up to date ", style="lg.muted")
+    else:
+        gi_badge = Text(f" ✓ {gi_status} ", style="lg.badge.success")
+    report.add_row(".gitignore", gi_badge)
+
+    console.print(
+        Panel(
+            report,
+            title="[lg.muted]logram init[/lg.muted]",
+            title_align="left",
+            box=PANEL_BOX,
+            border_style="lg.muted",
+            padding=(0, 1),
+        )
+    )
+    console.print()
+
+    any_written = any("written" in s for _, s in rules_results)
+    if any_written:
+        hint = Text()
+        hint.append("  agent rules files written — ", style="lg.muted")
+        hint.append("commit them alongside your pipeline code", style="lg.brand")
+        console.print(hint)
+        console.print()
+
+
+# ---------------------------------------------------------------------------
 # MCP install helpers
 # ---------------------------------------------------------------------------
 
@@ -2449,6 +2564,33 @@ def mcp_install(
             )
         )
         console.print()
+
+        # Write agent rules files to cwd (skip silently if they already exist).
+        rules_results = _write_agent_rules_files(Path.cwd())
+        written = [(n, s) for n, s in rules_results if "written" in s]
+        if written:
+            rules_table = Table(
+                box=TABLE_BOX,
+                show_edge=False,
+                show_lines=False,
+                expand=False,
+                pad_edge=False,
+            )
+            rules_table.add_column("file", style="lg.brand")
+            rules_table.add_column("", style="lg.muted")
+            for dest_name, _ in written:
+                rules_table.add_row(dest_name, "written")
+            console.print(
+                Panel(
+                    rules_table,
+                    title="[lg.muted]agent rules[/lg.muted]",
+                    title_align="left",
+                    box=PANEL_BOX,
+                    border_style="lg.muted",
+                    padding=(0, 1),
+                )
+            )
+            console.print()
 
 
 def main() -> None:

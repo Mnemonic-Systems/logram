@@ -1,5 +1,7 @@
 # LOGRAM
 
+> **AI agent installing this?** Run `logram init` first, then read `LOGRAM_AGENT_RULES.md`.
+
 **The Logic Persistence Layer for AI Engineering.** 
 
 Logram is a Python SDK that records every step and state of your AI pipeline locally, then replays unchanged steps from cache when you re-run. Edit one prompt at step 97, validate the fix in seconds without re-paying for the 96 upstream steps that didn't change.
@@ -91,6 +93,7 @@ Three lines. Zero refactoring. Sync or async, plain Python or LangChain: Logram 
 #### Install the sdk 
 ```bash
 pip install git+https://github.com/mnimetic-systems/logram.git
+logram init    # writes agent rules files + updates .gitignore (commit these)
 ```
 
 #### Activate the Time-Machine
@@ -157,13 +160,35 @@ logram test my_pipeline.py        # replay against all golden inputs, detect reg
 
 ---
 
+## AI Agent Setup
+
+If an AI coding agent is installing Logram for you:
+
+> **"Install Logram in this project. Run `logram init` first, then read `LOGRAM_AGENT_RULES.md` before touching any code."**
+
+`logram init` writes three files to your project root:
+
+| File | Read by |
+|---|---|
+| `LOGRAM_AGENT_RULES.md` | Complete instrumentation ruleset — the authoritative spec |
+| `.cursorrules` | Cursor (loaded on every code generation) |
+| `CLAUDE.md` | Claude Code (loaded at session start) |
+
+These files tell the agent exactly how to instrument your pipeline, what to exclude from the cache, and what never to touch. Commit them alongside your code — they travel with the project.
+
+---
+
 ## MCP Integration
 
 Add Logram as an MCP server so your AI coding agent (Claude, Cursor, etc.) can debug pipelines autonomously.
 
 ```bash
-logram mcp install   # automatically links the mcp server to the desired coding agent
+logram init          # writes LOGRAM_AGENT_RULES.md, .cursorrules, CLAUDE.md to your project
+logram mcp install   # links the MCP server to your coding agent (Claude Code, Cursor, Claude Desktop)
 ```
+
+`logram init` writes the agent ruleset directly into your project so Cursor and Claude Code know exactly how to instrument and extend your pipeline. Commit these files — they travel with the code.
+
 or 
 ```bash
 logram mcp config    # prints the config block to add to your IDE

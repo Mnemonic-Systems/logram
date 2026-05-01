@@ -1,0 +1,156 @@
+# LOGRAM — CURSOR AGENT RULES
+
+> Condensed ruleset for Cursor when working on a codebase that uses **logram-sdk**.
+> The full specification lives in `LOGRAM_AGENT_RULES.md`. Read it for edge cases.
+
+---
+
+## PRIME DIRECTIVE — AUTONOMOUS JUDGMENT & ZERO-INTRUSION
+
+You are a guest in the user's codebase. Adapt Logram to the existing code; never refactor the code to fit Logram. The configuration surface is wide BY DESIGN — reach for a `@trace` parameter before you reach for a structural change.
+
+**Default reflexes:**
+- When in doubt, instrument LESS, not more.
+- Exclude-first (`ignore_in_hash`, `exclude_state`) before refactoring signatures.
+- The "do-nothing" option is always on the table for any candidate function.
+- Every non-obvious decision MUST appear in the hand-off summary.
+- Stop at the first solution that works. Do not stack "improvements".
+
+**Cost ladder — always operate at the LOWEST tier that solves the problem:**
+1. `@trace()` with no params → 2. `ignore_in_hash` → 3. `vcr_key_fn` → 4. `track_args` → 5. `__logram_trace_key__` (additive) → 6. `@stateful` → 7. move inline imports → 8. **NEVER without explicit user approval:** signature changes, class splits, module restructures.
+
+---
+
+## HARD RULES (MUST / MUST NOT)
+
+### Lifecycle
+- `logram.init(project=..., input_id=...)` exactly ONCE at the entry point, BEFORE any traced function runs.
+- `await logram.finalize(status=...)` in BOTH success AND failure paths (use try/except).
+- Never call `init()` mid-run. Never call `init()` inside multiprocessing workers — use `logram.worker_init` as the pool initializer instead.
+
+### `@logram.trace()`
+- Place it as the **INNERMOST** decorator (closest to `def`). Framework decorators (`@app.post`, `@retry`) go ON TOP.
+- Trace boundaries of WORK: LLM/VLM calls, expensive transforms, per-item processors. NOT trivial helpers, dunders, or framework boilerplate.
+- Sync, async, generators, async generators — all supported natively. Do NOT change the function shape.
+- Exceptions MUST propagate. Never `try: ... except: return None` inside a traced function — Logram caches SUCCESS only; a swallowed error becomes a permanent fake-success cache entry.
+
+### `@logram.stateful(include=[...])`
+- Required on any class whose `@trace`-decorated methods mutate `self.<attr>` across calls.
+- List ONLY load-bearing fields. Exclude runtime resources (`self._http_client`, `self._lock`, `self._semaphore`).
+
+### Custom argument identity
+- Any custom class passed to a traced function needs `__logram_trace_key__` returning a stable serializable dict — UNLESS it's a Pydantic model, dataclass, or already has stable content-based repr.
+- Watch for `[PROBE 2][UNSTABLE_REPR]` in logs — that's the diagnostic signal to add this method.
+
+### Globals & imports
+- Define prompts/configs at MODULE LEVEL — captured by the Oracle automatically (any naming convention).
+- Move inline `import` statements to module top **only if** the imported module's constants are used by the traced function. If the inline import is intentional (cycle-breaking, lazy load), leave it and surface the trade-off.
+- Never mutate module-level globals mid-run inside a traced function. Move mutable state into a `@stateful` class.
+
+### Returns
+- Pydantic models / dataclasses preferred (perfect type rehydration on replay). Plain dicts work but lose typing.
+- NEVER return non-serializable resources (open files, sockets, DB connections, locks). Wrap surrounding logic instead.
+
+### Distributed
+- `ProcessPoolExecutor(initializer=logram.worker_init, initargs=(run_id,))`.
+- On Linux: `multiprocessing.set_start_method("spawn", force=True)` BEFORE creating any pool.
+
+### Web servers
+- Per-request run binding via `@logram.with_session_run(...)` or `logram.bind_session_run(session)`. Never a single global `init()` at app startup.
+
+---
+
+## ABSOLUTE PROHIBITIONS (NEVER, under any circumstances)
+
+1. **Never edit, monkey-patch, or wrap the Logram SDK source** (`logram/decorators.py`, `logram/storage.py`, `logram/oracle.py`, etc.).
+2. **Never swallow exceptions inside `@trace`** — converts real failure into cached fake success.
+3. **Never trace a function that calls `logram.init()`, `logram.finalize()`, or `logram.flush()`.**
+4. **Never trace `__init__`, `__repr__`, `__hash__`, `__eq__`, or any dunder.**
+5. **Never hardcode `os.environ["LOGRAM_REPLAY"] = "true"` in user source.** Env vars are user-facing controls.
+6. **Never commit `.logram/` or `.logram_assets/`** — add both to `.gitignore`.
+7. **Never use `LOGRAM_FORCE_STEP` on a FAILED step** — they run live automatically; the Logic Guard will abort.
+8. **Never restructure user code (split classes, change signatures, move modules) without explicit user approval.** Surface as a separate proposal.
+
+---
+
+## EXCLUSION TOOLKIT — WHAT TO REACH FOR INSTEAD OF REFACTORING
+
+| User code shape | Reach for THIS |
+|---|---|
+| Function takes `request_id` / `timestamp` / `trace_ctx` | `@trace(ignore_in_hash=["request_id", ...])` |
+| Class has 14 attrs, 3 matter for replay | `@stateful(include=["only", "the", "three"])` |
+| Helper method doesn't read `self.*` | `@trace(state_in_hash=False)` |
+| Method depends on subset of state | `@trace(include_state=["page_map"])` |
+| Function receives huge object (80KB+) | `@trace(vcr_key_fn=lambda f, a, kw: ({"id": kw["x"].id}, {}))` |
+| Mutable in-place argument pattern | `@trace(track_args=["accumulator"])` |
+| Custom class with unstable repr | Add `__logram_trace_key__` (3 lines, additive) |
+| `getattr(self, dyn)` dispatch | `@trace(vcr_key_fn=...)` exposing the discriminator |
+| Display in `logram view` is unhelpful | `@trace(log_input_fn=lambda ...)` (zero risk — display only) |
+| Function genuinely incompatible with caching | **Do NOT trace it.** A function left untraced is a feature. |
+
+---
+
+## CANONICAL SHAPE
+
+```python
+import logram
+
+logram.init(project="my_pipeline", input_id=doc_id)
+try:
+    @logram.stateful(include=["results"])
+    class Pipeline:
+        def __init__(self):
+            self.results = {}
+
+        @logram.trace()
+        async def call_llm(self, prompt: str) -> str:
+            return await client.chat(prompt)
+
+        @logram.trace()
+        async def process(self, item) -> dict:
+            out = await self.call_llm(item.text)
+            self.results[item.id] = out
+            return out
+
+    result = await Pipeline().process(item)
+    await logram.finalize(status="success")
+except Exception:
+    await logram.finalize(status="failed")
+    raise
+```
+
+---
+
+## HAND-OFF FORMAT (after any instrumentation pass)
+
+Report to the user, in this exact structure:
+
+1. **Traced** — `<file>:<symbol> — <reason>` per item.
+2. **Deliberately NOT traced** — `<file>:<symbol> — <reason>` per item (trivial helper, non-deterministic, framework code, etc.).
+3. **Configuration knobs used** — every `ignore_in_hash`, `vcr_key_fn`, `include_state`, `track_args` with one-line rationale.
+4. **Code changes beyond decorators** — list each, justify each. If empty, say so.
+5. **Open questions parked** — refactors you considered but did not perform.
+6. **Verification commands** — `python <entry>.py` then `LOGRAM_REPLAY=true python <entry>.py`.
+
+---
+
+## ENVIRONMENT VARIABLES (TELL THE USER, DO NOT HARDCODE)
+
+| Variable | Purpose |
+|---|---|
+| `LOGRAM_REPLAY=true` | Enable replay; cached SUCCESS steps return from cache. |
+| `LOGRAM_FORCE_STEP=name1,name2` | Force named SUCCESS steps to re-execute live. |
+| `LOGRAM_FORCE_FROM=name` | Cascade live execution from this step onward. |
+| `LOGRAM_DB_PATH=/path` | Override SQLite store location. |
+| `LOGRAM_PROJECT_ROOT=/path` | Override project root for blob assets (Docker, monorepo). |
+
+---
+
+## WHEN IN DOUBT
+
+- A working untraced pipeline beats a broken instrumented one.
+- A `@trace` parameter beats a code refactor.
+- Surfacing a question beats a silent decision.
+- The user's existing convention beats any rule in this file.
+
+For full specification, edge cases, and rationale → read `LOGRAM_AGENT_RULES.md`.
