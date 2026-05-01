@@ -12,6 +12,7 @@ import queue
 import sqlite3
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -614,7 +615,8 @@ class TraceStorage:
         try:
             row = conn.execute(
                 """
-                SELECT output_json, duration, started_at, finished_at, prompt_tokens, completion_tokens
+                SELECT output_json, duration, started_at, finished_at, prompt_tokens, completion_tokens,
+                       step_id, run_id
                 FROM steps
                 WHERE logic_hash = ? AND status IN ('SUCCESS', 'REPLAYED')
                 ORDER BY timestamp DESC
@@ -631,9 +633,87 @@ class TraceStorage:
                 "finished_at": float(row[3]) if row[3] is not None else None,
                 "prompt_tokens": int(row[4]) if row[4] is not None else None,
                 "completion_tokens": int(row[5]) if row[5] is not None else None,
+                "step_id": str(row[6]) if row[6] is not None else None,
+                "run_id": str(row[7]) if row[7] is not None else None,
             }
         except Exception:
             return None
+
+    def _copy_callee_subtree(
+        self,
+        conn: sqlite3.Connection,
+        source_step_id: str,
+        source_run_id: str,
+        new_parent_step_id: str,
+        new_run_id: str,
+        base_ts: float,
+    ) -> None:
+        """Copy child step rows from source_run into new_run as REPLAYED rows.
+
+        Only called when the parent step is REPLAYED, meaning its Merkle hash
+        matched — so the entire callee subtree is provably unchanged.
+        """
+        id_map: dict[str, str] = {source_step_id: new_parent_step_id}
+        frontier: list[str] = [source_step_id]
+        while frontier:
+            placeholders = ",".join("?" * len(frontier))
+            rows = conn.execute(
+                f"""
+                SELECT step_id, parent_step_id, name, inputs_json, output_json,
+                       logic_hash, duration, started_at, finished_at,
+                       prompt_tokens, completion_tokens, state_delta, args_delta,
+                       error_json
+                FROM steps
+                WHERE parent_step_id IN ({placeholders}) AND run_id = ?
+                ORDER BY timestamp
+                """,
+                (*frontier, source_run_id),
+            ).fetchall()
+            frontier = []
+            for row in rows:
+                (old_id, old_parent, name, inputs_json, output_json,
+                 logic_hash, duration, started_at, finished_at,
+                 prompt_tokens, completion_tokens, state_delta, args_delta,
+                 error_json) = row
+                new_id = str(uuid.uuid4())
+                id_map[old_id] = new_id
+                frontier.append(old_id)
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO steps (
+                        step_id, run_id, parent_step_id, name, inputs_json, output_json,
+                        logic_hash, status, duration, started_at, finished_at,
+                        prompt_tokens, completion_tokens, state_delta, args_delta,
+                        error_json, timestamp
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'REPLAYED', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        new_id,
+                        new_run_id,
+                        id_map.get(old_parent, old_parent),
+                        name,
+                        inputs_json,
+                        output_json,
+                        logic_hash,
+                        float(duration or 0.0),
+                        float(started_at) if started_at is not None else base_ts,
+                        float(finished_at) if finished_at is not None else base_ts,
+                        int(prompt_tokens) if prompt_tokens is not None else None,
+                        int(completion_tokens) if completion_tokens is not None else None,
+                        state_delta,
+                        args_delta,
+                        error_json,
+                        base_ts,
+                    ),
+                )
+        log.debug(
+            "[Logram][Diag E][Persist] callee_subtree_copied source_step_id=%s source_run_id=%s new_parent=%s new_run_id=%s nodes=%d",
+            source_step_id,
+            source_run_id,
+            new_parent_step_id,
+            new_run_id,
+            len(id_map) - 1,
+        )
 
     def save_step_sync(
         self,
@@ -790,6 +870,7 @@ class TraceStorage:
                             continue
 
                 # Data aliasing + duration recovery for replay rows.
+                replay_source: dict[str, Any] | None = None
                 if status == "REPLAYED":
                     replay_source = self._load_replay_source_step(conn, logic_hash)
                     if replay_source is not None:
@@ -912,6 +993,15 @@ class TraceStorage:
                     len(args_delta_json) if isinstance(args_delta_json, str) else 0,
                     len(error_json) if isinstance(error_json, str) else 0,
                 )
+
+                if status == "REPLAYED" and replay_source is not None:
+                    src_step_id = replay_source.get("step_id")
+                    src_run_id = replay_source.get("run_id")
+                    if src_step_id and src_run_id and src_run_id != req.run_id:
+                        try:
+                            self._copy_callee_subtree(conn, src_step_id, src_run_id, step_id, req.run_id, timestamp)
+                        except Exception as ce:
+                            log.warning("[Logram] callee subtree copy failed for step %s: %s", step_id, ce)
 
                 conn.execute(
                     "UPDATE runs SET updated_at = ?, status = COALESCE(status, 'running') WHERE run_id = ?",
