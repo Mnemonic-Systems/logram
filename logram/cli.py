@@ -11,13 +11,16 @@ import sqlite3
 import subprocess
 import sys
 import time
+import shutil
 import webbrowser
 from collections import defaultdict
 from dataclasses import dataclass
+from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import Any
 
 import typer
+from click.shell_completion import CompletionItem as _CompletionItem
 from rich import box
 from rich.panel import Panel
 from rich.progress_bar import ProgressBar
@@ -514,6 +517,82 @@ def _sum_metric_keys(obj: Any, keys: tuple[str, ...]) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Smart run resolution
+# ---------------------------------------------------------------------------
+
+
+def _resolve_run_id(conn: sqlite3.Connection, token: str) -> str:
+    """Resolve a shorthand token (last, fail, -1, -2…) to a real run_id."""
+    t = token.strip()
+
+    if t == "last":
+        row = conn.execute("SELECT run_id FROM runs ORDER BY created_at DESC LIMIT 1").fetchone()
+        if not row:
+            console.print()
+            console.print(Panel(Text("No runs found in this database.", style="lg.muted"), box=PANEL_BOX, border_style="lg.muted", padding=(0, 2)))
+            raise typer.Exit(1)
+        return row["run_id"]
+
+    if t in ("last-failed", "fail", "failed"):
+        row = conn.execute(
+            "SELECT run_id FROM runs WHERE UPPER(status) IN ('FAILED','FAILURE','ERROR') ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        if not row:
+            console.print()
+            console.print(Panel(Text("No failed run found in this database.", style="lg.muted"), box=PANEL_BOX, border_style="lg.muted", padding=(0, 2)))
+            raise typer.Exit(1)
+        return row["run_id"]
+
+    if t.startswith("-") and t[1:].isdigit():
+        offset = int(t[1:]) - 1
+        row = conn.execute("SELECT run_id FROM runs ORDER BY created_at DESC LIMIT 1 OFFSET ?", (offset,)).fetchone()
+        if not row:
+            console.print()
+            console.print(Panel(Text(f"No run found at index {t}.", style="lg.muted"), box=PANEL_BOX, border_style="lg.muted", padding=(0, 2)))
+            raise typer.Exit(1)
+        return row["run_id"]
+
+    return t
+
+
+_SHORTHAND_COMPLETIONS: list[tuple[str, str]] = [
+    ("last", "Most recent run"),
+    ("last-failed", "Most recent failed run"),
+    ("fail", "Most recent failed run (alias)"),
+    ("-1", "Most recent run"),
+    ("-2", "Second most recent run"),
+    ("-3", "Third most recent run"),
+]
+
+
+def _complete_run_id(ctx: typer.Context, param: typer.CallbackParam, incomplete: str) -> list[_CompletionItem]:
+    """Shell completion callback: shorthands + real run_ids from the DB."""
+    completions: list[_CompletionItem] = [
+        _CompletionItem(token, help=desc)
+        for token, desc in _SHORTHAND_COMPLETIONS
+        if token.startswith(incomplete)
+    ]
+    if not DB_PATH.exists():
+        return completions
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT run_id, project, status, created_at FROM runs WHERE run_id LIKE ? ORDER BY created_at DESC LIMIT 20",
+                (f"{incomplete}%",),
+            ).fetchall()
+            for row in rows:
+                help_text = f"{row['project'] or '-'} · {row['status'] or '?'} · {_relative_time(row['created_at'])}"
+                completions.append(_CompletionItem(row["run_id"], help=help_text))
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    return completions
+
+
+# ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
 
@@ -733,13 +812,14 @@ def list_runs(
 
 
 @app.command()
-def inspect(run_id: str) -> None:
-    """Affiche l'arbre chronologique d'exécution d'un run."""
+def inspect(run_id: str = typer.Argument(..., shell_complete=_complete_run_id)) -> None:
+    """Affiche l'arbre chronologique d'exécution d'un run. Accepte: last, fail, -1, -2…"""
     conn = _connect_db()
     if conn is None:
         raise typer.Exit(1)
 
     try:
+        run_id = _resolve_run_id(conn, run_id)
         run = conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
         if not run:
             console.print()
@@ -848,7 +928,7 @@ def inspect(run_id: str) -> None:
         summary.append(f"{replayed_count} steps", style="lg.brand")
         console.print(summary)
         console.print()
-        console.print(hint_line("lg view <step_id> to inspect", f"lg diff <run_a> {run_id} to compare"))
+        console.print(hint_line("lg view <step_id> to inspect", "lg diff last to compare with previous", "lg live to watch runs"))
         console.print()
 
     finally:
@@ -1082,19 +1162,69 @@ def replay(
 
 @app.command()
 def diff(
-    run_a: str,
-    run_b: str,
+    run_a: str | None = typer.Argument(None, shell_complete=_complete_run_id),
+    run_b: str | None = typer.Argument(None, shell_complete=_complete_run_id),
+    ss: bool = typer.Option(False, "--ss", help="Comparer le dernier run avec le dernier SUCCESS (même input_id)."),
     code: bool = typer.Option(False, "--code", "-c", help="Afficher uniquement le diff du code source."),
     globals_only: bool = typer.Option(False, "--globals", "-g", help="Afficher uniquement le diff des globals/prompts."),
     inputs: bool = typer.Option(False, "--inputs", "-i", help="Afficher uniquement le diff des inputs."),
     outputs: bool = typer.Option(False, "--outputs", "-o", help="Afficher uniquement le diff des outputs."),
 ) -> None:
-    """Compare deux run_id (code + data)."""
+    """Compare deux runs (code + data). Raccourcis: last, fail, -1… · --ss: dernier run vs dernier SUCCESS."""
     conn = _connect_db()
     if conn is None:
         raise typer.Exit(1)
 
     try:
+        # --- shorthand resolution ---
+        if ss:
+            _last = conn.execute("SELECT run_id, input_id FROM runs ORDER BY created_at DESC LIMIT 1").fetchone()
+            if not _last:
+                console.print()
+                console.print(Panel(Text("No runs found.", style="lg.muted"), box=PANEL_BOX, border_style="lg.muted", padding=(0, 2)))
+                raise typer.Exit(1)
+            _last_success = conn.execute(
+                "SELECT run_id FROM runs WHERE input_id = ? AND UPPER(status) IN ('SUCCESS','CACHE_HIT','REPLAY_HIT') ORDER BY created_at DESC LIMIT 1",
+                (_last["input_id"],),
+            ).fetchone()
+            if not _last_success:
+                console.print()
+                console.print(Panel(Text("No SUCCESS run found for this input_id.", style="lg.muted"), box=PANEL_BOX, border_style="lg.muted", padding=(0, 2)))
+                raise typer.Exit(1)
+            run_a = _last["run_id"]
+            run_b = _last_success["run_id"]
+            if run_a == run_b:
+                console.print()
+                console.print(Panel(Text("Last run is already a SUCCESS — nothing to compare with --ss.", style="lg.muted"), box=PANEL_BOX, border_style="lg.muted", padding=(0, 2)))
+                raise typer.Exit(0)
+        elif run_a == "last" and run_b is None:
+            _last = conn.execute("SELECT run_id, input_id FROM runs ORDER BY created_at DESC LIMIT 1").fetchone()
+            if not _last:
+                console.print()
+                console.print(Panel(Text("No runs found.", style="lg.muted"), box=PANEL_BOX, border_style="lg.muted", padding=(0, 2)))
+                raise typer.Exit(1)
+            _prev = conn.execute(
+                "SELECT run_id FROM runs WHERE input_id = ? AND run_id != ? ORDER BY created_at DESC LIMIT 1",
+                (_last["input_id"], _last["run_id"]),
+            ).fetchone()
+            if not _prev:
+                console.print()
+                console.print(Panel(Text("Only one run found for this input_id — nothing to compare.", style="lg.muted"), box=PANEL_BOX, border_style="lg.muted", padding=(0, 2)))
+                raise typer.Exit(1)
+            run_a = _last["run_id"]
+            run_b = _prev["run_id"]
+        elif run_a is not None and run_b is None:
+            console.print()
+            console.print(Panel(Text("Provide two run_ids, use 'last' alone, or use --ss.", style="lg.muted"), box=PANEL_BOX, border_style="lg.muted", padding=(0, 2)))
+            raise typer.Exit(1)
+        elif run_a is None:
+            console.print()
+            console.print(Panel(Text("Usage: lg diff last  ·  lg diff --ss  ·  lg diff <run_a> <run_b>", style="lg.muted"), box=PANEL_BOX, border_style="lg.muted", padding=(0, 2)))
+            raise typer.Exit(1)
+        else:
+            run_a = _resolve_run_id(conn, run_a)
+            run_b = _resolve_run_id(conn, run_b)
+
         meta_a = conn.execute("SELECT run_id, input_id FROM runs WHERE run_id = ?", (run_a,)).fetchone()
         meta_b = conn.execute("SELECT run_id, input_id FROM runs WHERE run_id = ?", (run_b,)).fetchone()
         if not meta_a or not meta_b:
@@ -1366,6 +1496,12 @@ def diff(
                 )
             )
         console.print()
+        console.print(hint_line(
+            f"lg inspect {run_a} · lg inspect {run_b} for step details",
+            "lg diff --ss to compare last vs last-success",
+            "lg stats for ROI",
+        ))
+        console.print()
 
     finally:
         conn.close()
@@ -1438,13 +1574,14 @@ def recover(logic_hash: str) -> None:
 
 
 @app.command()
-def restore(run_id: str) -> None:
-    """MVP anti-erreur: affiche les blocs de code à recopier pour revenir à l'état d'un run."""
+def restore(run_id: str = typer.Argument(..., shell_complete=_complete_run_id)) -> None:
+    """MVP anti-erreur: affiche les blocs de code à recopier pour revenir à l'état d'un run. Accepte: last, fail, -1…"""
     conn = _connect_db()
     if conn is None:
         raise typer.Exit(1)
 
     try:
+        run_id = _resolve_run_id(conn, run_id)
         globals_expr = _logic_registry_globals_expr(conn, "lr")
         rows = conn.execute(
             f"""
@@ -1789,7 +1926,7 @@ def test(script_py: str) -> None:
 
 @app.command()
 def stats(
-    run_id_arg: str | None = typer.Argument(None, metavar="[RUN_ID]"),
+    run_id_arg: str | None = typer.Argument(None, metavar="[RUN_ID]", shell_complete=_complete_run_id),
     run_id: str | None = typer.Option(None, "--run-id", help="Scope Run: stats d'un run précis."),
     project: str | None = typer.Option(None, "--project", help="Scope Projet: filtre sur le nom de projet/pipeline."),
     input_id: str | None = typer.Option(None, "--input-id", help="Scope Input: filtre sur un document précis."),
@@ -1814,6 +1951,8 @@ def stats(
             raise typer.Exit(1)
 
         selected_run_id = run_id_arg or run_id
+        if selected_run_id:
+            selected_run_id = _resolve_run_id(conn, selected_run_id)
 
         scope = "global"
         if selected_run_id:
@@ -2060,6 +2199,291 @@ def clean() -> None:
 
     finally:
         conn.close()
+
+
+@app.command()
+def doctor() -> None:
+    """Vérifie la santé de l'environnement Logram : Python, stockage, agents MCP, nettoyage."""
+    rows: list[tuple[str, Text, str]] = []
+
+    def _ok() -> Text:
+        return Text(" ✓ ok ", style="lg.badge.success")
+
+    def _warn() -> Text:
+        return Text(" ⚠ warn ", style="lg.badge.live")
+
+    def _fail() -> Text:
+        return Text(" ✗ fail ", style="lg.badge.failed")
+
+    def _na() -> Text:
+        return Text(" – n/a ", style="dim")
+
+    # --- Environnement ---
+    py = sys.version_info
+    py_detail = f"{py.major}.{py.minor}.{py.micro}"
+    rows.append(("Python", _ok() if py >= (3, 10) else _warn(), py_detail + ("" if py >= (3, 10) else " (3.10+ recommended)")))
+
+    try:
+        lg_ver = _pkg_version("logram")
+        rows.append(("Logram SDK", _ok(), lg_ver))
+    except Exception:
+        rows.append(("Logram SDK", _fail(), "not installed via pip"))
+
+    # --- Stockage ---
+    logram_dir = DB_PATH.parent
+    if logram_dir.exists():
+        writable = os.access(logram_dir, os.W_OK)
+        rows.append((".logram/", _ok() if writable else _warn(), str(logram_dir) + (" (read-only!)" if not writable else "")))
+    else:
+        rows.append((".logram/", _fail(), "directory missing — run your pipeline first"))
+
+    if DB_PATH.exists():
+        db_size = DB_PATH.stat().st_size
+        try:
+            _c = sqlite3.connect(DB_PATH)
+            _c.row_factory = sqlite3.Row
+            run_count = _c.execute("SELECT COUNT(*) AS n FROM runs").fetchone()["n"]
+            _c.close()
+            rows.append(("logram.db", _ok(), f"{db_size // 1024} KB · {run_count} run(s)"))
+        except Exception as exc:
+            rows.append(("logram.db", _warn(), f"readable but query failed: {exc}"))
+    else:
+        rows.append(("logram.db", _fail(), "not found — run your pipeline first"))
+
+    # --- Intégration Agent : Claude Code ---
+    claude_bin = shutil.which("claude")
+    if claude_bin:
+        claude_json = Path.home() / ".claude.json"
+        if claude_json.exists():
+            try:
+                data = json.loads(claude_json.read_text(encoding="utf-8"))
+                if "logram" in (data.get("mcpServers") or {}):
+                    rows.append(("Claude Code MCP", _ok(), "logram found in ~/.claude.json"))
+                else:
+                    rows.append(("Claude Code MCP", _warn(), "claude found but logram not in ~/.claude.json · run: lg mcp install"))
+            except Exception:
+                rows.append(("Claude Code MCP", _warn(), "claude found but ~/.claude.json unreadable"))
+        else:
+            rows.append(("Claude Code MCP", _warn(), "claude found but ~/.claude.json not present"))
+    else:
+        rows.append(("Claude Code MCP", _na(), "claude CLI not found in PATH"))
+
+    # --- Intégration Agent : Claude Desktop ---
+    desktop_path = _claude_desktop_config_path()
+    if desktop_path and desktop_path.exists():
+        try:
+            data = json.loads(desktop_path.read_text(encoding="utf-8"))
+            if "logram" in (data.get("mcpServers") or {}):
+                rows.append(("Claude Desktop MCP", _ok(), "logram found in config"))
+            else:
+                rows.append(("Claude Desktop MCP", _warn(), "config found but logram not wired · run: lg mcp install"))
+        except Exception:
+            rows.append(("Claude Desktop MCP", _warn(), "config unreadable"))
+    elif desktop_path:
+        rows.append(("Claude Desktop MCP", _na(), "config file not found"))
+    else:
+        rows.append(("Claude Desktop MCP", _na(), "not supported on this platform"))
+
+    # --- Intégration Agent : Cursor ---
+    cursor_mcp: Path | None = None
+    for candidate in [Path.cwd(), *list(Path.cwd().parents)[:3]]:
+        p = candidate / ".cursor" / "mcp.json"
+        if p.exists():
+            cursor_mcp = p
+            break
+    if cursor_mcp:
+        try:
+            data = json.loads(cursor_mcp.read_text(encoding="utf-8"))
+            if "logram" in (data.get("mcpServers") or {}):
+                rows.append(("Cursor MCP", _ok(), f"logram found in {cursor_mcp.relative_to(Path.cwd())}"))
+            else:
+                rows.append(("Cursor MCP", _warn(), f"found {cursor_mcp.name} but logram not wired"))
+        except Exception:
+            rows.append(("Cursor MCP", _warn(), "mcp.json found but unreadable"))
+    else:
+        rows.append(("Cursor MCP", _na(), "no .cursor/mcp.json found in project tree"))
+
+    # --- Nettoyage ---
+    failed_count = 0
+    orphan_count = 0
+    if DB_PATH.exists():
+        try:
+            _c = sqlite3.connect(DB_PATH)
+            _c.row_factory = sqlite3.Row
+            failed_count = _c.execute(
+                "SELECT COUNT(*) AS n FROM runs WHERE UPPER(status) IN ('FAILED','FAILURE','ERROR')"
+            ).fetchone()["n"]
+            db_blob_paths: set[str] = set()
+            for _row in _c.execute("SELECT output_json FROM steps").fetchall():
+                for blob in _extract_blobs(_parse_json(_row["output_json"])):
+                    p = blob.get("path")
+                    if isinstance(p, str):
+                        db_blob_paths.add(str(Path(p)))
+            _c.close()
+            if ASSETS_DIR.exists():
+                orphan_count = sum(1 for p in ASSETS_DIR.rglob("*") if p.is_file() and str(p) not in db_blob_paths)
+        except Exception:
+            pass
+
+    cleanup_detail_parts = []
+    if failed_count:
+        cleanup_detail_parts.append(f"{failed_count} failed run(s)")
+    if orphan_count:
+        cleanup_detail_parts.append(f"{orphan_count} orphan blob(s)")
+    cleanup_detail = "  ·  ".join(cleanup_detail_parts) or "clean"
+    rows.append(("Cleanup", _ok() if not cleanup_detail_parts else _warn(), cleanup_detail))
+
+    # --- Render ---
+    table = Table(
+        box=TABLE_BOX,
+        show_edge=False,
+        show_lines=False,
+        expand=False,
+        pad_edge=False,
+        header_style="lg.header",
+    )
+    table.add_column("check", style="lg.brand", min_width=20)
+    table.add_column("status", justify="center", min_width=10)
+    table.add_column("detail", style="lg.muted")
+    for check, status, detail in rows:
+        table.add_row(check, status, detail)
+
+    console.print()
+    console.print(
+        Panel(
+            table,
+            title="[lg.muted]logram doctor[/lg.muted]",
+            title_align="left",
+            box=PANEL_BOX,
+            border_style="lg.muted",
+            padding=(0, 1),
+        )
+    )
+    console.print()
+    console.print(hint_line("lg mcp install to wire an agent", "lg clean to remove orphans", "lg list to browse runs"))
+    console.print()
+
+
+@app.command()
+def live(
+    interval: int = typer.Option(500, "--interval", min=100, help="Intervalle de polling en millisecondes (défaut: 500)."),
+) -> None:
+    """Dashboard temps réel du run en cours, avec arbre partiel + spinner (polling à 500ms)."""
+    from rich.console import Group
+    from rich.live import Live
+
+    _SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    _tick = 0
+
+    conn = _connect_db()
+    if conn is None:
+        raise typer.Exit(1)
+
+    def _build() -> Any:
+        nonlocal _tick
+        _tick += 1
+        spin = _SPINNER[_tick % len(_SPINNER)]
+
+        active = conn.execute(
+            "SELECT * FROM runs WHERE UPPER(status) IN ('RUNNING','STARTED') ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+
+        run = active
+        is_active = True
+        if run is None:
+            run = conn.execute("SELECT * FROM runs ORDER BY created_at DESC LIMIT 1").fetchone()
+            is_active = False
+
+        if run is None:
+            return Text(f"  {spin} No runs yet. Waiting…", style="lg.muted")
+
+        run_id = run["run_id"]
+        steps = _load_steps_for_run(conn, run_id)
+
+        header = Text()
+        header.append(run_id, style="bold lg.brand")
+        header.append("  ·  ", style="lg.muted")
+        header.append(run["project"] or "-", style="lg.muted")
+        header.append("  ·  ", style="lg.muted")
+        header.append(_format_dt(run["created_at"]), style="lg.muted")
+        header.append("  ·  ", style="lg.muted")
+        if is_active:
+            header.append(" ⚡ live ", style="lg.badge.live")
+        else:
+            header.append_text(status_badge(run["status"]))
+
+        if not steps:
+            if is_active:
+                return Group(header, Text(""), Text(f"  {spin} starting…", style="lg.warning"))
+            return Group(header, Text("  No steps recorded.", style="lg.muted"))
+
+        by_parent: dict[str | None, list[StepRecord]] = defaultdict(list)
+        by_id: dict[str, StepRecord] = {}
+        for s in steps:
+            by_parent[s.parent_step_id].append(s)
+            by_id[s.step_id] = s
+        for children in by_parent.values():
+            children.sort(key=lambda x: x.timestamp)
+
+        tree = Tree(Text(run["project"] or run_id, style="bold"), guide_style="lg.muted")
+        root_steps = list(by_parent.get(None, []))
+        root_steps += [s for s in steps if s.parent_step_id and s.parent_step_id not in by_id]
+        seen: set[str] = set()
+
+        def _step_label(step: StepRecord) -> Text:
+            t = Text()
+            icon = step_icon(step.status)
+            color = step_color(step.status)
+            t.append(f"{icon} ", style=color)
+            t.append(step.name, style=f"bold {color}")
+            t.append("  ")
+            t.append(_format_duration(step.duration), style="lg.dur.fast" if step.duration <= 2.5 else "lg.dur.slow")
+            t.append("  ")
+            t.append_text(step_badge(step.status))
+            return t
+
+        def add_node(parent_tree: Tree, step: StepRecord) -> None:
+            if step.step_id in seen:
+                return
+            seen.add(step.step_id)
+            node = parent_tree.add(_step_label(step))
+            for child in by_parent.get(step.step_id, []):
+                add_node(node, child)
+
+        for root in root_steps:
+            add_node(tree, root)
+        for step in steps:
+            if step.step_id not in seen:
+                add_node(tree, step)
+
+        total_dur = sum(s.duration for s in steps)
+        footer = Text(f"  {len(steps)} step(s)  ·  {total_dur:.2f}s", style="lg.muted")
+
+        parts: list[Any] = [header, Text(""), tree, Text(""), footer]
+        if is_active:
+            parts.append(Text(f"  {spin} running…", style="lg.warning"))
+        else:
+            parts.append(Text("  Waiting for new run…", style="lg.muted"))
+
+        return Group(*parts)
+
+    try:
+        refresh = max(1, 1000 // interval)
+        with Live(console=console, refresh_per_second=refresh) as live_view:
+            while True:
+                try:
+                    live_view.update(_build())
+                except Exception:
+                    pass
+                time.sleep(interval / 1000.0)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        conn.close()
+
+    console.print()
+    console.print(hint_line("lg inspect <run_id> to see full tree", "lg list to browse runs", "lg diff last to compare last two"))
+    console.print()
 
 
 @mcp_app.command("start")
