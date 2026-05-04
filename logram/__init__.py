@@ -19,9 +19,9 @@ def set_run_id(run_id: str, *, verbose: bool = False) -> str:
     """Bind an explicit run id to the current async context."""
     current_run_id.set(run_id)
     if verbose:
-        print(f"[LOGRAM] Session initialisée : {run_id}")
+        print(f"[LOGRAM] Session initialized: {run_id}")
         if os.environ.get("LOGRAM_REPLAY") == "true":
-            print("[LOGRAM] Mode REPLAY activé (Time-Travel)")
+            print("[LOGRAM] REPLAY MODE enabled (Time-Travel)")
     return run_id
 
 

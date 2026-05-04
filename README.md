@@ -193,8 +193,7 @@ logram mcp install   # links the MCP server to your coding agent (Claude Code, C
 ```
 
 `logram init` writes the agent ruleset directly into your project so Cursor and Claude Code know exactly how to instrument and extend your pipeline. Commit these files — they travel with the code.
-
-or 
+ 
 ```bash
 logram mcp config    # prints the config block to add to your IDE
 ```
@@ -813,14 +812,16 @@ Monitoring observes the past. Logram enables you to engineer a higher-performing
 <details>
 <summary><strong><code>vcr_key_fn</code></strong> — Custom cache key function</summary>
 
-**Why:** By default, Logram hashes all named arguments to build the VCR cache key. This works perfectly for primitive arguments (strings, ints, dicts). But if your function receives a large object — an `ImageTile` with 80KB of image bytes — the default compaction may produce a key that is too coarse (lossy hash) or too sensitive (any field change = cache miss). You also need this for **dynamic dispatch** patterns (`getattr(self, f"handle_{type}")`) where the Oracle marks the call site volatile but cannot statically resolve the actual callee.
+**Why:** By default, Logram hashes all named arguments to build the VCR cache key. This works perfectly for primitive arguments (strings, ints, dicts). The problem with custom objects is **false cache misses**: if an argument contains fields that change between runs but don't affect the output (an internal counter, a timestamp embedded in the object), the key changes every run and replay never hits. Use `vcr_key_fn` to pin the key to the subset of fields that actually define identity. The other common case is **third-party objects you can't modify**: you can't add `__logram_trace_key__` to `langchain.Document`, but you can define a key extractor at the call site.
 
-**When:** Use `vcr_key_fn` when the default key is either too broad (false cache hits) or too narrow (false cache misses), or when your control flow depends on a runtime variable that the static call graph cannot see.
+**When:** Use `vcr_key_fn` when the default key produces false cache misses (irrelevant fields change between runs), or when the argument type belongs to a library you don't control.
 
 ```python
+# Own class: pin the key to identity fields only.
+# args[0] = self, args[1] = tile (raw positional args, before any binding).
 @logram.trace(
     vcr_key_fn=lambda func, args, kwargs: (
-        {"tile_id": kwargs["tile"].tile_id, "page": kwargs["tile"].page_number},
+        {"tile_id": args[1].tile_id, "page": args[1].page_number},
         {}
     )
 )
@@ -828,9 +829,21 @@ async def process_tile(self, tile: ImageTile) -> dict:
     # Cache key = tile_id + page_number only.
     # The 80KB image_bytes are NOT part of the key — tile_id is a stable proxy.
     ...
+
+
+# Third-party class: vcr_key_fn is the only option when you can't touch the class.
+from langchain.schema import Document
+
+@logram.trace(
+    vcr_key_fn=lambda func, args, kwargs: (
+        {"page_content": args[0].page_content},
+        {}
+    )
+)
+def extract_entities(doc: Document) -> list[str]: ...
 ```
 
-The function receives `(func, args, kwargs)` and must return `(vcr_args_dict, vcr_kwargs_dict)`. Only the returned values enter the hash.
+The function receives `(func, args, kwargs)` where `args` contains all positional arguments as-is — including `self` for methods (`args[0]`). Returns `(vcr_args, vcr_kwargs)`; a single return value is also accepted and paired with `{}` automatically. Only the returned values enter the hash.
 
 </details>
 
@@ -1004,7 +1017,7 @@ On replay, Logram restores `accumulator` to the state it was in after the live c
 <details>
 <summary><strong><code>__logram_trace_key__</code></strong> — Stable cache identity for custom objects</summary>
 
-**Why:** Logram builds the VCR cache key by serializing arguments. For most custom objects, the fallback representation includes a memory address (`<ImageTile object at 0x7f3a2c>`) — different on every run. The Oracle's deep value snapshot is **address-free by design** (it captures only `type.__qualname__` for unknown types), so it never poisons the cache *itself* — but the cache key derived from your call's arguments still depends on something unique to that argument. Without a stable key, every call looks like a fresh input.
+**Why:** Logram builds the VCR cache key by running each argument through a compaction chain. Primitives (`str`, `int`, `dict`, `list`), dataclasses, and Pydantic models all produce stable, content-based keys automatically. For plain custom classes, the chain reaches its last resort: `repr()`. Python's default `repr()` returns `<ImageTile object at 0x7f3a2c>` — the address changes every run, so every call looks like a fresh input and replay never hits.
 
 **When:** Implement `__logram_trace_key__` on any class that is passed as an argument to a traced function and does not have a stable, content-based representation. This is the most common cause of unexpected cache misses on custom object types.
 
