@@ -66,6 +66,8 @@ With Logram, your agent can:
 
 > **"Logram gives your AI agent runtime memory. It stops guessing and starts engineering."**
 
+## 📽️ Replay in Action
+*Iterating on a prompt and fast-forwarding a VLM and LLM demo pipeline*
 ![Logram Demo](demo/demonstration_replay.gif)
 
 ---
