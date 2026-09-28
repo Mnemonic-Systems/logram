@@ -1,112 +1,84 @@
-# LOGRAM
+# Logram
 
-> **AI agent installing this?** Run `logram init` first, then read `LOGRAM_AGENT_RULES.md`.
-
-**The Logic Persistence Layer for AI Engineering.** 
-
-Logram is a Python SDK that records every step and state of your AI pipeline locally, then replays unchanged steps from cache when you re-run. Edit one prompt at step 97, validate the fix in seconds without re-paying for the 96 upstream steps that didn't change.
-
-Stop monitoring failures. Start fast-forwarding them.
-Fix logic in seconds, not minutes. Save 99% on API costs. ⭐
+**Step-level caching and replay for Python AI pipelines, keyed on a semantic fingerprint of the code.**
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue?style=flat-square)
 ![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)
 ![Version](https://img.shields.io/badge/version-0.3.0-blueviolet?style=flat-square)
-[![Waitlist](https://img.shields.io/badge/Dashboard-Join%20Waitlist-orange?style=flat-square)](https://logram.dev/waitlist)
+[![Dashboard](https://img.shields.io/badge/Dashboard-waitlist-orange?style=flat-square)](https://logram.dev/waitlist)
+
+Logram records every traced step of a pipeline (inputs, outputs, object state, and the exact code and constants that produced them) in a local store. On the next run, each step is looked up by a fingerprint of its logic and arguments: if nothing relevant changed, the recorded output is replayed; otherwise the step runs live. Editing one prompt at step 97 re-executes only what depends on that edit.
+
+![Replay demo](demo/demonstration_replay.gif)
+*Iterating on a prompt in a VLM + LLM pipeline: unchanged steps replay from the store, only the edited step runs live.*
+
+> **Installing with an AI agent?** Run `logram init` first, then have the agent read `LOGRAM_AGENT_RULES.md`.
 
 ---
 
-## The Problem: The AI Feedback Loop is Broken
+## Contents
 
-AI engineering is currently 90% waiting and 10% thinking. 
-
-Imagine a pipeline processing 150 image tiles through a VLM. At step 97, you notice a logic error or a prompt hallucination. Today, you are forced to:
-1. **Wait** 4 minutes for steps 1–96 to re-execute.
-2. **Pay** ~$0.80 in redundant API tokens just to reach the failure point.
-3. **Guess** the fix because AI agents have zero visibility into the actual runtime state of previous runs.
-
-This **"Tax on Curiosity"** prevents developers from testing more hypotheses and forces AI agents to assume fixes based on static files rather than empirical facts.
-
-**Logram collapses this tax.**
-
-| Feature | Without Logram | **With Logram (Replay)** |
-| :--- | :--- | :--- |
-| **Re-run cost** (150-tile VLM) | ~$0.80 | **~$0.004 (Surgical)** |
-| **Feedback Latency** | ~4 minutes | **~2 seconds** |
-| **Agent Autonomy** | Blind Guesswork | **Closed-loop Engineering** |
-| **Determinism** | Low (Full re-run) | **Total (Unchanged logic frozen)** |
+- [Motivation](#motivation)
+- [What Logram is](#what-logram-is) · [What Logram is not](#what-logram-is-not)
+- [Quickstart](#quickstart)
+- [How it works](#how-it-works)
+- [Agent interface (MCP)](#agent-interface-mcp)
+- [Architecture](#architecture)
+- [Guarantees, best practices and limitations](#guarantees-best-practices-and-limitations)
+- [Related tools](#related-tools)
+- [CLI reference](#cli-reference)
+- [Advanced usage](#advanced-usage)
+- [Design rationale](#design-rationale)
+- [Status](#status)
 
 ---
 
-## What Logram Is
+## Motivation
 
-Logram acts as a **Silent Passenger** in your Python code. By adding a simple `@trace` decorator, you establish a persistent record of your pipeline's logic, data flow, and state, **all staying 100% local.**
+Multi-step pipelines built on LLM or VLM calls are slow, costly and non-deterministic. Consider a pipeline that processes 150 image tiles through a VLM, where a logic error appears at step 97. Testing a fix today means:
 
-### 1. Deep Fingerprinting
-Logram doesn't just hash inputs. It maps your code's **Topology**. Before a step runs, it computes a logic fingerprint using:
-- **Structural AST Hashing:** Detects logic changes while ignoring formatting, comments, or Python version shifts (3.10 to 3.13).
-- **MRO-Aware Resolution:** Tracks changes in parent class methods through the Method Resolution Order.
-- **Constant Scavenging:** Captures the real-time values of prompts and configs, even in `snake_case` or nested modules.
+1. **Waiting** about 4 minutes for steps 1–96 to re-execute.
+2. **Paying** about $0.80 in API calls to reach the failure point again.
+3. **Guessing**, since coding agents only see static source files, not what actually ran.
 
-### 2. Logic Oracle (Divergence Analysis)
-When a pipeline performed better yesterday than today, Logram’s engine can performs an **exhaustive tree walk** to identify the exact point of divergence between the two runs. It finds the prompt that changed 3 levels deep in your call-graph and shows you the unified diff.
+A fourth cost is less visible: every full re-run re-samples the upstream steps, so the effect of a change is **confounded** with sampling noise from steps that were never modified.
 
-### 3. Surgical Replay
-When you re-run, unchanged steps are replayed from the local SQLite store in **0.001s**. Only the modified logic—and the steps impacted by its new output—execute live.
+Freezing unchanged steps addresses all four.
 
-### 4. Agentic Autonomy:
-
-AI coding agents are "blind" to the runtime, they are forced to "guess" fixes on AI pipelines based on static files. Logram's native **Model Context Protocol (MCP)** server transforms your agent into an autonomous pipeline engineer.
-
-With Logram, your agent can:
-- **Analyze:** Interrogate the trace store to identify why a run diverged.
-- **Navigate:** Traverse the recursive call graph to find the root cause of a failure.
-- **Experiment:** Apply a prompt optimization and trigger a targeted replay to **self-validate** the fix in seconds at zero cost.
-- **Certify:** Autonomously run regressions against your **Golden Dataset** to prove an upgrade is safe.
-
-> **"Logram gives your AI agent runtime memory. It stops guessing and starts engineering."**
-
-## 📽️ Replay in Action
-*Iterating on a prompt and fast-forwarding a VLM and LLM demo pipeline*
-![Logram Demo](demo/demonstration_replay.gif)
+| | Full re-run | Replay with Logram |
+|---|---|---|
+| Cost to validate a fix (150-tile VLM example) | ~$0.80 | ~$0.004 |
+| Feedback latency | ~4 min | ~2 s |
+| Upstream outputs | Re-sampled on every run | Identical to the baseline |
+| Agent context | Static source files | Runtime traces, diffs, targeted replay |
 
 ---
 
-## What Logram is Not
+## What Logram is
 
-Logram is a specialized tool for **Development Velocity**. To understand its unique place in your stack, it is important to know its boundaries:
+A decorator-based SDK (`@logram.trace`) that records a pipeline's logic, data flow and state, **entirely locally**, and provides four capabilities on top of that record:
 
-*   **Not a Monitoring or Observability Tool.**
-    Logram is not designed for production environments. It has no latency dashboards, no alerting, and no anomaly detection. Use **LangSmith**, **Langfuse**, or **Datadog** for production observability. They are excellent at observing the past; Logram is built for fixing the future.
+1. **Logic fingerprinting.** Before a step runs, Logram computes a fingerprint of its code from the abstract syntax tree, the runtime values of the constants it reads, and the functions it calls, recursively. Formatting, comments and Python-version changes do not affect it; semantic changes do.
+2. **Replay.** Unchanged steps are replayed from a local SQLite store in about 1 ms. Only modified logic, and the steps that consume its new output, execute live.
+3. **Divergence analysis.** When two runs disagree, Logram walks the call graph of both and reports exactly what changed, down to a prompt constant three levels deep, with a unified diff.
+4. **Agent interface.** A native MCP server exposes the trace store to coding agents (Claude, Cursor), which can inspect what ran, locate the cause of a divergence, apply a change, validate it by replay, and check it against reference runs.
 
-*   **Not an Eval or Benchmarking Framework.**
-    Logram's Golden Dataset feature answers one question: *"Did my change break the baseline?"* It is a regression guard, not an accuracy measurement system. To compute deep metrics or compare prompt strategies across hundreds of documents, use **RAGAS**, **DeepEval**, or custom eval harnesses.
+## What Logram is not
 
-*   **Not an Orchestration Framework.**
-    You do not define your pipeline *in* Logram. There are no DAG objects, no retry policies, and no task schedulers. Whether you use **LangChain**, **LlamaIndex**, **Prefect**, or plain Python functions, Logram wraps them transparently. It adapts to your code; you don't adapt to it.
-
-*   **Not an AI Coding Assistant Plugin.**
-    The MCP server does not write code or suggest completions. It provides your agent (**Claude**, **Cursor**) with the **Ground Truth** of your runtime (real prompts, real outputs, real logic diffs). Logram makes your agent an actionable expert on your specific pipeline, not a better autocomplete.
+- **Not a monitoring or observability tool.** It is not designed for production: no latency dashboards, alerting or anomaly detection. Use LangSmith, Langfuse or Datadog for that. They observe the past; Logram is for iterating on the next version.
+- **Not an evaluation or benchmarking framework.** Its golden-run feature answers one question: *did my change break the baseline?* It is a regression guard, not an accuracy measurement system. For metrics across hundreds of documents, use RAGAS, DeepEval or a custom harness.
+- **Not an orchestration framework.** There are no DAG objects, retry policies or schedulers. Logram wraps existing code, whether it uses LangChain, LlamaIndex, Prefect or plain Python functions.
+- **Not a coding-assistant plugin.** The MCP server does not write code or suggest completions. It gives the agent ground truth about the runtime: real prompts, real outputs, real logic diffs.
 
 ---
 
 ## Quickstart
 
-Three lines. Zero refactoring. Sync or async, plain Python or LangChain: Logram wraps it.
-
-#### Install the sdk 
 ```bash
-pip install git+https://github.com/mnimetic-systems/logram.git
-logram init    # writes agent rules files + updates .gitignore (commit these)
+pip install git+https://github.com/Mnemonic-Systems/logram.git
+logram init    # writes agent rule files and updates .gitignore (commit them)
 ```
 
-#### Activate the Time-Machine
-By default, Logram acts as a silent recorder. To trigger the VCR engine and skip unchanged logic, you must set the `LOGRAM_REPLAY` environment variable:
-
-```bash
-LOGRAM_REPLAY=true
-```
-#### Start using
 ```python
 import logram
 
@@ -123,16 +95,16 @@ async def extract_quantities(vlm_output):
 await logram.finalize(status="success")
 ```
 
-Run it once. Fix a bug. Run it again: every unchanged step replays from cache in microseconds, only your fix executes live.
+By default Logram only records. Replay is enabled with `LOGRAM_REPLAY=true`:
 
 ```bash
-python my_pipeline.py                  # live run, populates cache
-# (edit a prompt, change a constant, rewrite a function)
-LOGRAM_REPLAY=true python my_pipeline.py   # ~2s replay, only the fix runs live
-logram replay my_pipeline.py               # CLI shorthand, same effect
+python my_pipeline.py                        # live run, populates the store
+# edit a prompt, change a constant, rewrite a function
+LOGRAM_REPLAY=true python my_pipeline.py     # unchanged steps replay, the edit runs live
+logram replay my_pipeline.py                 # equivalent CLI shorthand
 ```
 
-#### Stateful pipelines
+**Stateful pipelines**
 
 ```python
 @logram.stateful(include=["results", "page_map"])
@@ -146,63 +118,159 @@ class InvoicePipeline:
         ...
 ```
 
-#### Inspect & diff
+**Inspect and diff**
 
 ```bash
-logram inspect                    # list recent runs
-logram inspect <run_id>           # detailed step tree for a run
-logram inspect last               # inspect the most recent run
-logram diff <run_a> <run_b>       # what changed: source, globals, callees, I/O
-logram diff last                  # diff last run vs previous (same input)
-logram diff --ss                  # diff last run vs last SUCCESS (same input)
-logram recover <logic_hash>       # exact code + prompts that ran
-logram doctor                     # environment health check
-logram live                       # real-time run dashboard
+logram inspect last               # step tree of the most recent run
+logram diff last                  # last run vs previous run on the same input
+logram diff --ss                  # last run vs last successful run on the same input
+logram recover <logic_hash>       # exact code and prompts that ran
+logram doctor                     # environment check
 ```
 
-#### Golden regression tests
+**Regression against reference runs**
 
 ```bash
-logram golden add <run_id>        # tag a validated run as a golden reference
-logram test my_pipeline.py        # replay against all golden inputs, detect regressions
+logram golden add <run_id>        # mark a validated run as a reference
+logram test my_pipeline.py        # replay all reference inputs, report regressions
 ```
+
+Sync and async functions are both supported, with or without a framework. Token usage is extracted automatically from OpenAI, Anthropic and Gemini clients.
 
 ---
 
-## AI Agent Setup
+## How it works
 
-If an AI coding agent is installing Logram for you:
+```mermaid
+flowchart LR
+    A[Your code] -->|"@logram.trace"| B[AST Oracle]
+    B -->|structural hash| C[Logic fingerprint]
+    B -->|runtime introspection| D[Resolved globals]
+    B -->|MRO traversal| E[Callee Merkle tree]
+    C & D & E --> F{Cache lookup}
+    F -->|hit| G["Replay (µs, $0)"]
+    F -->|miss| H[Execute live, record]
+    H --> F
+```
 
-> **"Install Logram in this project. Run `logram init` first, then read `LOGRAM_AGENT_RULES.md` before touching any code."**
+### The logic fingerprint (AST Oracle)
 
-`logram init` writes three files to your project root:
+The cache depends on one question: *did the logic change?* Hashing the source string fails on reformatting; hashing bytecode fails on Python upgrades. Neither change alters behaviour. The Oracle parses each traced function, walks its syntax tree, and produces a fingerprint that is stable against everything except a change in execution semantics:
 
-| File | Read by |
+```text
+fingerprint = SHA-256(
+    structural_AST            # cross-version stable
+  ⊕ resolved_global_values    # runtime values, content-addressed
+  ⊕ defaults / closures
+  ⊕ callee_merkle_root        # Merkle aggregation over the call graph
+)
+```
+
+| Layer | What it captures | Stability |
+|---|---|---|
+| Structural AST hash | Canonical tree: every node, operator and branch | Invariant to whitespace, comments, docstrings and `ast.unparse` formatting drift |
+| Resolved globals | Runtime values of every constant the function reads (`dict`, `list`, `str`, `int`, `float`, `bool`) | Detects `CONFIG['temperature'] = 0.7 → 0.9` without any source change |
+| Closures and defaults | `__closure__` cell contents, positional and keyword defaults | Captures factory-built callables and parameter-baked configuration |
+| Callee Merkle tree | Recursive hash of every user-space function reachable through the call graph | A change in a helper at depth 5 invalidates the parent, in O(N), cycle-safe, bounded at 256 nodes |
+| Volatility markers | Deterministic tags for `eval`, `exec`, `compile`, dynamic `getattr` | Identical code gives an identical hash, even with dynamic constructs |
+
+**Cross-version stability.** Upgrading from Python 3.10 to 3.13, reformatting with `black` or `ruff format`, adding docstrings or editing comments leaves the fingerprint unchanged. Only a semantic edit produces a new hash.
+
+**Method resolution.** Most caching engines treat `self.helper(x)` as opaque: `helper` is neither a global nor a closure. The Oracle recovers the enclosing class from `func.__qualname__`, walks the method resolution order (`cls.__mro__`), and resolves through `@classmethod`, `@staticmethod` and `@property`:
+
+```python
+class Pipeline:
+    def parse(self, raw):          # edit this body...
+        return clean(raw)
+
+    def run(self, doc):
+        parsed = self.parse(doc)   # ...and the cache for run() is invalidated
+        return self.summarize(parsed)
+```
+
+**Constants by value, not by name.** The Oracle snapshots the runtime value of every constant a function reads when it is called, whatever the naming convention:
+
+```python
+temperature = 0.7              # captured
+SYSTEM_PROMPT = "You are…"     # captured
+modelName = "gpt-4o"           # captured
+PROMPT_VARIANTS = ["a", "b"]   # captured deeply, not just by identity
+```
+
+Changing `temperature` or calling `PROMPT_VARIANTS.append("c")` both invalidate the cache.
+
+**Deterministic volatility.** When a function uses `eval`, `exec` or a dynamic `getattr`, its behaviour cannot be proven statically. Engines typically either ignore the dynamic call (silent corruption) or add a time-based nonce (the cache never hits). Logram emits a deterministic marker instead:
+
+```python
+def dynamic(s):
+    return eval(s)
+# snapshot contains: <volatile:eval>
+```
+
+The marker is identical on every run, so the cache keeps working as long as the source is unchanged; adding or removing dynamic code invalidates it. Literal attribute access (`getattr(self, "name")`) is treated as a plain read; only `getattr(self, var_name)` produces `<volatile:getattr_dyn>`, so common idioms such as Pydantic field access do not poison the cache.
+
+### Replay rules
+
+A step's cache key combines its logic fingerprint, its arguments and, for stateful classes, the tracked object state.
+
+- **Only successful steps are cached.** A step that failed (bug, rate limit, timeout, malformed LLM response) is never stored and always re-executes live. Transient errors retry; logic errors get fixed.
+- **Outputs keep their types.** Pydantic models and dataclasses come back as instances, not dicts (see [Serialization](#serialization)).
+
+### Stateful replay
+
+Standard caching assumes pure functions, which methods that mutate instance state are not. `@logram.stateful` declares the attributes to track. On a live run, Logram stores the state delta after every traced method; on replay, it restores that state before returning the cached result, so the next step receives the state it expects.
+
+```python
+@logram.stateful(include=["detections", "page_map", "ocr_cache"])
+class DocumentPipeline:
+    ...
+```
+
+The state snapshot is a separate component of the cache key, not part of the logic fingerprint: code changes invalidate through the Oracle, state changes through `@stateful`.
+
+### Divergence analysis
+
+When a pipeline that worked yesterday breaks today, the question is not *what failed* but *what changed*. `analyze_logic_divergence` (and `logram diff`) performs an exhaustive walk of the logic registry, recursing through every callee resolved by the Oracle:
+
+```text
+step_name
+  └── helper_fn              (depth 1) — no change
+        └── build_prompt     (depth 2) — no change
+              └── format_section (depth 3) — globals: SECTION_PROMPT_V2 changed
+                    before: "Extract the quantities..."
+                    after:  "Extract the quantities and units..."
+```
+
+<img width="1068" height="265" alt="Divergence analysis output" src="https://github.com/user-attachments/assets/8b54aa9a-f344-4f35-b823-68ec4498bd01" />
+
+---
+
+## Agent interface (MCP)
+
+Coding agents such as Claude and Cursor work from static source files. When a pipeline fails at step 97, the agent can read the code but not what actually ran. Logram's MCP server gives it access to the trace store, so it can:
+
+- **Analyze**: identify failing runs, or read the exact runtime prompts of a successful baseline.
+- **Navigate**: walk the recursive call graph to find where a prompt or helper is defined and called.
+- **Experiment**: apply a change and validate it with a targeted replay, in about 2 s at no API cost.
+- **Certify**: run the updated pipeline against reference runs to check that a fix for one input did not break others.
+
+### Setup
+
+```bash
+logram init          # writes the agent rule files below into your project
+logram mcp install   # registers the MCP server with Claude Code, Cursor or Claude Desktop
+logram mcp config    # or print the config block to add manually
+```
+
+| File written by `logram init` | Read by |
 |---|---|
-| `LOGRAM_AGENT_RULES.md` | Complete instrumentation ruleset — the authoritative spec |
-| `.cursorrules` | Cursor (loaded on every code generation) |
-| `CLAUDE.md` | Claude Code (loaded at session start) |
+| `LOGRAM_AGENT_RULES.md` | Complete instrumentation rules (authoritative spec) |
+| `.cursorrules` | Cursor, on every code generation |
+| `CLAUDE.md` | Claude Code, at session start |
 
-These files tell the agent exactly how to instrument your pipeline, what to exclude from the cache, and what never to touch. Commit them alongside your code — they travel with the project.
+These files tell the agent how to instrument the pipeline, what to exclude from the cache and what never to touch. Commit them with your code.
 
----
-
-## MCP Integration
-
-Add Logram as an MCP server so your AI coding agent (Claude, Cursor, etc.) can debug pipelines autonomously.
-
-```bash
-logram init          # writes LOGRAM_AGENT_RULES.md, .cursorrules, CLAUDE.md to your project
-logram mcp install   # links the MCP server to your coding agent (Claude Code, Cursor, Claude Desktop)
-```
-
-`logram init` writes the agent ruleset directly into your project so Cursor and Claude Code know exactly how to instrument and extend your pipeline. Commit these files — they travel with the code.
- 
-```bash
-logram mcp config    # prints the config block to add to your IDE
-```
-
-Paste the output into your `~/.cursor/mcp.json` or Claude Desktop config:
+Manual configuration (`~/.cursor/mcp.json` or Claude Desktop config):
 
 ```json
 {
@@ -215,189 +283,31 @@ Paste the output into your `~/.cursor/mcp.json` or Claude Desktop config:
 }
 ```
 
-### Available MCP Tools
+### Tools
 
-| Tool | When to Use |
+| Tool | When to use |
 |---|---|
-| `list_runs(project)` | First call in any debugging session — returns run IDs |
-| `get_investigation_brief(run_id)` | Immediate triage of a failed run — which step, which error, which logic hash |
-| `get_step_source(logic_hash)` | Read the exact code + prompts that ran at failure time |
-| `analyze_logic_divergence(run_id_a, run_id_b)` | Find what changed between two runs — recursive diff |
-| `compare_step_data(run_id_a, run_id_b, step_name)` | Diff runtime inputs/outputs when logic is identical |
-| `run_surgical_replay(script_path)` | Validate a fix in ~2s — only modified steps run live |
-| `verify_against_golden_dataset(project, script_path)` | Certify no regression before closing a bug |
+| `list_runs(project)` | First call in a debugging session; returns run IDs |
+| `get_investigation_brief(run_id)` | Triage of a failed run: step, error, logic hash |
+| `get_step_source(logic_hash)` | Exact code and prompts that ran at failure time |
+| `analyze_logic_divergence(run_id_a, run_id_b)` | What changed between two runs, recursively |
+| `compare_step_data(run_id_a, run_id_b, step_name)` | Diff runtime inputs and outputs when logic is identical |
+| `run_surgical_replay(script_path)` | Validate a fix in ~2 s; only modified steps run live |
+| `verify_against_golden_dataset(project, script_path)` | Check for regressions before closing a bug |
 
-The MCP server enforces three security gates on `run_surgical_replay`:
-- **Path Jail** — only `.py` files inside the current working directory
-- **Circuit Breaker** — max 5 replays per agent session to prevent runaway API cost
-- **Logic Guard** — aborts if the logic hash hasn't changed since the last failure
+`run_surgical_replay` enforces three safety gates:
 
-
-If you love the project, leave a ⭐ !
-
----
-
-## Core Engine — The AST Oracle
-
-Logram's cache lives or dies by one question: *did the logic change?* Answers could be with: a hash of the source string or the bytecode. Both are wrong. A reformatted file changes its source string. A Python upgrade changes its bytecode. Neither change altered behavior — but both invalidate the cache.
-
-**Logram answers it with an Oracle.** Before any traced step runs, the Oracle parses the function, walks its abstract syntax tree, and produces a fingerprint that is stable against everything *except* a real change in execution semantics.
-
-```mermaid
-flowchart LR
-    A[Your Code] -->|"@logram.trace"| B[AST Oracle]
-    B -->|structural hash| C[Logic Fingerprint]
-    B -->|JIT introspection| D[Resolved Globals]
-    B -->|MRO traversal| E[Callee Merkle Tree]
-    C & D & E --> F{VCR Cache}
-    F -->|hit| G["Replay (μs, $0)"]
-    F -->|miss| H[Live execute + cache]
-    H --> F
-```
-
-### What the Oracle captures
-
-| Layer | What it sees | Stability |
-|---|---|---|
-| **Structural AST hash** | Canonical tree of your function — every node, every operator, every branch | Invariant to whitespace, comments, docstrings, and `ast.unparse` formatting drift |
-| **Resolved globals (JIT)** | The *runtime values* of every constant the function reads — `dict`, `list`, `str`, `int`, `float`, `bool` | Picks up `CONFIG['temperature'] = 0.7 → 0.9` between runs without touching source |
-| **Closures & defaults** | `__closure__` cell contents, positional defaults, keyword defaults | Captures factory-built callables and parameter-baked configuration |
-| **Callee Merkle tree** | Recursive hash of every user-space function reachable through the call graph | A change in a helper at depth 5 invalidates the parent in O(N) — cycle-safe, budget-bounded at 256 nodes |
-| **Volatility markers** | Deterministic tags for `eval`, `exec`, `compile`, dynamic `getattr` | The cache stays usable: identical code → identical hash, even with dynamic constructs |
-
-### Cross-version stability
-
-```text
-Logic Fingerprint = SHA-256(
-    structural_AST           ← cross-version stable
-  ⊕ resolved_globals_values  ← runtime, content-addressed
-  ⊕ defaults / closures
-  ⊕ callee_merkle_root       ← Merkle aggregation
-)
-```
-
-Upgrade Python 3.10 → 3.13. Reformat the file with `black` or `ruff format`. Add docstrings. Rename a comment. **The fingerprint does not change.** The cache survives. Only a real semantic edit produces a new hash.
-
-### OOP-aware: MRO callee resolution
-
-Most cache engines see `self.helper(x)` as a black box — `helper` isn't a global, isn't a closure, can't be resolved statically. Logram's Oracle knows it's a method. It walks `func.__qualname__` to recover the enclosing class, traverses the **Method Resolution Order** (`cls.__mro__`), and resolves through `@classmethod`, `@staticmethod`, and `@property` descriptors.
-
-```python
-class Pipeline:
-    def parse(self, raw):       # ← change this body
-        return clean(raw)
-
-    def run(self, doc):
-        parsed = self.parse(doc)   # Logram sees the dependency
-        return self.summarize(parsed)
-```
-
-Edit `parse` — the cache for `run` invalidates. No annotations, no DI, no rewriting. The Oracle traces methods the way Python actually resolves them.
-
-### Smart Constants — convention-agnostic
-
-Logram doesn't care how you name your configuration. It captures the **value**, not the name:
-
-```python
-temperature = 0.7              # ← captured
-SYSTEM_PROMPT = "You are…"     # ← captured
-modelName = "gpt-4o"           # ← captured
-PROMPT_VARIANTS = ["a", "b"]   # ← captured (deep, not just identity)
-```
-
-Change `temperature = 0.7` to `0.9`. Mutate `PROMPT_VARIANTS.append("c")`. Logram detects both because it snapshots the **runtime value** at the moment the function is called, not the source token. Whether you write `snake_case`, `UPPERCASE`, `camelCase`, or none of the above — it works.
-
-### Deterministic Volatility
-
-When the Oracle sees `eval(s)`, `exec(code)`, or `getattr(self, dyn_var)`, it can't statically prove the function's behavior. Naïve engines react in one of two destructive ways: they ignore the dynamic call (silent corruption) or they inject a time-based nonce that guarantees a cache miss every run (cache becomes useless).
-
-Logram does neither. It emits a **deterministic marker**:
-
-```python
-def evil(s):
-    return eval(s)
-
-# Volatile markers in the snapshot:
-#   <volatile:eval>
-```
-
-`<volatile:eval>` is identical on every run. The cache still works — as long as the function source itself doesn't change. The marker only invalidates if you *add* or *remove* dynamic code.
-
-And literal-aware: `getattr(self, "name")` is treated as a plain attribute read (SAFE). Only `getattr(self, var_name)` produces `<volatile:getattr_dyn>`. Common Python idioms — Pydantic field access, dataclass introspection — don't poison the cache.
-
-> **Only `SUCCESS` steps are cached.** A step that failed — bug, rate limit, network timeout, malformed LLM response — is **never stored**. On the next replay, it always re-executes live. Transient errors retry; logic errors get fixed. You will never get a cached failure back.
-
----
-
-## Stateful Time-Travel Debugging
-
-Standard VCR caching doesn't work for methods that mutate class state. Logram solves this with the `@stateful` decorator.
-
-Mark the instance attributes your pipeline accumulates across steps:
-
-```python
-@logram.stateful(include=["detections", "page_map", "ocr_cache"])
-class DocumentPipeline:
-    ...
-```
-
-On a live run, Logram captures a **state delta** after every traced method — what changed, serialized and stored. On replay, before returning the cached result, Logram **restores the exact state** the object would have been in. The next step receives the world it expects.
-
-The result: a stateful, multi-step object pipeline replays correctly, not just a bag of pure functions.
-
----
-
-## Recursive Logic Divergence Analysis
-
-When a pipeline that worked yesterday breaks today, the question isn't *what failed* — it's *what changed*.
-
-`analyze_logic_divergence` performs an **exhaustive tree walk** of the logic registry, recursing through every callee resolved by the Oracle. If a prompt changed at depth 3 inside a helper that's called by a helper that's called by your traced step, Logram finds it, shows the unified diff, and tells you exactly which hash to inspect next.
-
-```text
-step_name
-  └── helper_fn          (depth 1) — no change
-        └── build_prompt (depth 2) — no change
-              └── format_section (depth 3) — globals:SECTION_PROMPT_V2 changed
-                    before: "Extract the quantities..."
-                    after:  "Extract the quantities and units..."
-```
-
-No guessing. No `git blame`. No print-debugging.
-
-<img width="1068" height="265" alt="image" src="https://github.com/user-attachments/assets/8b54aa9a-f344-4f35-b823-68ec4498bd01" />
-
----
-
-## Agentic Autonomy via Native MCP Server
-
-AI coding agents like Claude and Cursor work from static source files. When a pipeline crashes at step 97, the agent can read your code — but it can't see what actually ran, what the real prompts looked like, or what outputs were produced at each step.
-
-Logram's **MCP server** closes that gap. It gives your agent direct access to the trace store, so it can inspect real runtime data, diff logic between runs, and trigger a targeted replay to validate a fix — all without leaving the agent loop:
-
-- 🕵️‍♂️ **Diagnose & Analyze:** Identify failing runs, or read the exact runtime prompts of a successful baseline to find optimization opportunities.
-- 🗺️ **Trace the call graph:** Walk the recursive callee tree to locate exactly where a specific prompt or helper function is defined and called.
-- 🧪 **Experiment & Self-Validate:** Apply a fix or tune a prompt, then trigger a targeted replay. Logram fast-forwards through unchanged steps, validating the change in ~2 seconds for $0.00.
-- 🛡️ **Guard regressions:** Run the updated pipeline against the Golden Dataset to confirm an improvement on one document didn't break others.
-
-All without human intervention in the loop.
-
-```bash
-# Register the MCP server with Claude/Cursor in one command
-logram mcp install
-```
-
-Logram completes the AI development lifecycle by providing agents with empirical runtime context. By integrating the trace store via MCP, agents transition from static code generation to autonomous pipeline engineering. Instead of relying on assumptions, the agent interrogates historical execution data, implements targeted logic adjustments, and verifies outcomes through zero-cost surgical replays.
+- **Path jail**: only `.py` files inside the current working directory.
+- **Circuit breaker**: at most 5 replays per agent session, to bound API cost.
+- **Logic guard**: aborts if the logic hash has not changed since the last failure.
 
 ---
 
 ## Architecture
 
-### 🏠 Local-First, Zero-Dependency
+### Local-first storage
 
-All trace data lives in `.logram/logram.db` — a SQLite database on your machine. Binary payloads (images, PDFs) are stored as content-addressed blobs: the same image tile sent to 150 VLM calls is stored **once**. Nothing leaves your machine unless you choose to push to a remote.
-
-<details>
-<summary><strong>Storage layout</strong></summary>
+All trace data lives in a SQLite database on your machine. Binary payloads (images, PDFs) are stored as content-addressed blobs: an image tile sent to 150 VLM calls is stored once. Nothing leaves the machine.
 
 ```
 .logram/
@@ -406,277 +316,358 @@ All trace data lives in `.logram/logram.db` — a SQLite database on your machin
   <sha256_prefix>/     # deduplicated binary blobs
 ```
 
-WAL mode is enabled by default for concurrent read/write performance — you can run `logram inspect` while a pipeline is executing without locking the writer.
+WAL mode is enabled by default, so `logram inspect` can run while a pipeline is writing.
 
-</details>
+### Framework-agnostic
 
----
+Logram instruments plain Python functions with a decorator, with no framework lock-in: any LLM client (OpenAI, Gemini, Anthropic, with automatic token-usage extraction), any orchestration layer (LangChain, LlamaIndex, or none), sync and async.
 
-### 🔌 Framework Agnostic
+### Zero runtime impact
 
-Logram instruments plain Python functions with a decorator. No framework lock-in. Works with:
+Three guarantees:
 
-- **Any LLM client** — OpenAI, Gemini, Anthropic (usage token extraction is automatic)
-- **Any orchestration layer** — LangChain, LlamaIndex, or no framework at all
-- **Sync and async** — both supported natively, no adapter needed
-
----
-
-### 🪶 Zero Runtime Impact — Three Hard Guarantees
-
-**It never crashes your pipeline.**
-Every tracing operation runs inside a total catch-all. If the database is unavailable, serialization fails, or source introspection throws — the original function is called transparently. Logram fails silently so your pipeline never does.
-
-**It never blocks your pipeline.**
-All SQLite writes happen in a dedicated background daemon thread. The traced function returns the moment its result is computed — disk I/O is fire-and-forget. In live mode, the VCR lookup is skipped entirely: no DB query, no file I/O.
-
-**It is transparent to your type system.**
-`@logram.trace` uses `@functools.wraps` — the decorated function preserves its `__name__`, `__qualname__`, `__doc__`, and signature. Type checkers and frameworks see the original function unchanged.
+- **It never crashes your pipeline.** Every tracing operation runs inside a catch-all. If the database is unavailable, serialization fails or introspection throws, the original function is called unchanged.
+- **It never blocks your pipeline.** All SQLite writes happen in a background daemon thread. In live mode, the cache lookup is skipped entirely.
+- **It is transparent to your type system.** `@logram.trace` uses `@functools.wraps`, preserving `__name__`, `__qualname__`, `__doc__` and the signature.
 
 <details>
-<summary><strong>How these guarantees are enforced under the hood</strong></summary>
+<summary>Implementation details</summary>
 
-**Zero-crash contract** — the exact pattern in `decorators.py`:
+**Zero-crash contract** (`decorators.py`):
+
 ```python
 try:
     ctx = _prepare_step_ctx(...)
 except Exception:
-    return await func(*args, **kwargs)  # tracing failed — pipeline continues
+    return await func(*args, **kwargs)  # tracing failed, pipeline continues
 ```
 
-**Background write pipeline** — writes are enqueued via `queue.put_nowait()` (non-blocking) into a daemon thread that flushes to SQLite in batches of up to 50 items every 500ms. Queue capacity is 50,000 items; if it fills, writes are silently dropped — no backpressure, no slowdown, ever.
+**Background writes.** Writes are enqueued with `queue.put_nowait()` into a daemon thread that flushes to SQLite in batches of up to 50 items every 500 ms. The queue holds 50,000 items; if it fills, writes are dropped rather than applying backpressure.
 
-**Oracle memoization** — the AST Oracle (structural hash, JIT global resolution, MRO traversal, callee Merkle aggregation) is computed once per function per run via a `WeakKeyDictionary`. A step called 150 times in a tile loop pays the Oracle cost exactly once. The cache is cleared at `logram.init()` to pick up source edits between runs.
+**Oracle memoization.** The fingerprint is computed once per function per run and cached in a `WeakKeyDictionary`: a step called 150 times pays the analysis cost once. The cache is cleared at `logram.init()` to pick up source edits between runs.
 
 </details>
 
----
+### Serialization
 
-### 🔄 Universal Serialization — Any Type, Full Round-Trip
+Every step output is captured and rehydrated to its original type on replay.
 
-Every step output is captured and can be rehydrated back to its exact original type — Pydantic models, dataclasses, bytes, UUIDs, Paths, Enums, and more. You get typed objects back on cache hit, not raw dicts.
+1. **Capture.** `ensure_serializable` converts any object to a JSON-safe tree, tagging typed objects with their class and module path.
+2. **Store.** The tree goes to SQLite; binary data goes to `.logram_assets/`, keyed by SHA-256 and written once.
+3. **Rehydrate.** On a cache hit, tagged objects are reconstructed by dynamic import: `model_validate` for Pydantic, `cls(**state)` with nested coercion for dataclasses.
 
-<details>
-<summary><strong>The three-layer pipeline: Capture → Store → Rehydrate</strong></summary>
-
-**1. Capture** — `ensure_serializable` recursively converts any Python object into a JSON-safe tree. Every typed object is **tagged** with its class name and module path:
-
-| Type | Serialized as |
+| Type | Stored as |
 |---|---|
-| `Pydantic` v1 / v2 model | Tagged dict `{__af_kind__: "pydantic", __af_model__: ..., state: {...}}` |
-| Python `@dataclass` | Tagged dict `{__af_kind__: "dataclass", __af_model__: ..., state: {...}}` |
-| `bytes` / `bytearray` | Content-addressed blob in `.logram_assets/` — never stored twice |
+| Pydantic model (v1 / v2) | Tagged dict `{__af_kind__: "pydantic", __af_model__: ..., state: {...}}` |
+| `@dataclass` | Tagged dict `{__af_kind__: "dataclass", __af_model__: ..., state: {...}}` |
+| `bytes` / `bytearray` | Content-addressed blob, never stored twice |
 | `UUID`, `Path`, `datetime`, `Decimal`, `Enum` | Native string representation |
 | `dict`, `list`, `tuple`, `set`, `frozenset` | Recursive JSON tree |
-| Anything else | `str(obj)` — cache key remains valid, type not reconstructed |
+| Anything else | `str(obj)`: the cache key stays valid, the type is not reconstructed |
 
-**2. Store** — The JSON tree goes into SQLite. Binary blobs go to `.logram_assets/` keyed by SHA-256. Identical payloads (e.g. the same tile image sent 150 times) are written once.
+### Run versioning
 
-**3. Rehydrate** — On cache hit, `rehydrate_logram_output` walks the tree recursively. When it encounters a tagged dict, it dynamically imports the original class and reconstructs the exact instance — Pydantic via `model_validate`, dataclasses via `cls(**state)` with nested field coercion. The traced function receives back the same typed object it would have produced live. No manual deserialization. No type loss.
+Each run is stamped with an identifier derived from the git state, with no configuration:
 
-</details>
+- clean repository: `<commit_short>`, e.g. `3f9a2c8`;
+- dirty working tree: `<commit_short>-dirty-<md5_6_of_changes>`, e.g. `3f9a2c8-dirty-a4f91c` (the `.logram` directory is excluded from the hash).
 
----
-
-### 🔖 Semantic Versioning Built In
-
-Every run is automatically stamped with a **code version identifier** derived from your git state — no configuration required. When a bug appears on `feature/new-prompt` but not on `main`, you can immediately see which runs belong to which code state, then `logram diff <run_main> <run_feature>` to pinpoint exactly what changed.
-
-<details>
-<summary><strong>Version ID format and branch-comparison workflow</strong></summary>
-
-- **Clean repo:** `<commit_short>` — e.g. `3f9a2c8`
-- **Dirty working tree:** `<commit_short>-dirty-<md5_6_of_changes>` — e.g. `3f9a2c8-dirty-a4f91c`
-
-The `.logram` directory is excluded from the dirty hash, so log rotation and cache churn never drift your version ID.
-
-**Why it matters across branches:**
+When a bug appears on a feature branch but not on `main`, runs can be compared directly:
 
 ```
 logram list --project my_agent
-# run_abc  ·  3f9a2c8            ·  main        ·  SUCCESS  ·  0.004s
-# run_xyz  ·  4d1b7e2-dirty-...  ·  feature/…   ·  FAILED   ·  1.201s
-```
+# run_abc  ·  3f9a2c8            ·  main       ·  SUCCESS  ·  0.004s
+# run_xyz  ·  4d1b7e2-dirty-...  ·  feature/…  ·  FAILED   ·  1.201s
 
-```bash
 logram diff run_abc run_xyz --code --globals
 ```
 
-You immediately see which function was rewritten, which prompt constant changed, which callee was added — without touching branch names or deploy logs. The version ID is the bridge between your git history and your runtime behavior.
+---
+
+## Guarantees, best practices and limitations
+
+Logram tracks data flow, not system resources. The Oracle traces the code you write, not the code Python generates at runtime. The following rules make the difference between good and exact replays.
+
+### 1. Return data, not resources
+
+Avoid returning open files, sockets, database connections or non-yielding generators from a traced step. A non-serializable output is stored as `str(obj)`, so on replay the next step receives a string. Return dicts, Pydantic models or dataclasses.
+
+**Streaming outputs** (generators and async generators) are supported natively. During a live run, Logram captures each yielded chunk without adding latency. The cache is written only if the stream is fully consumed (a premature `break` creates no entry), and on replay the stored chunks are re-yielded:
+
+```python
+@logram.trace
+async def stream_llm(prompt: str):
+    async for chunk in client.chat(prompt, stream=True):
+        yield chunk
+
+async for part in stream_llm("Hello"):   # identical usage, live or replayed
+    print(part)
+```
+
+### 2. Typed outputs give exact rehydration
+
+Serialization is tag-based: class metadata is embedded at capture time, so no type annotation is required on the traced function. Return Pydantic models or dataclasses to get typed objects back on replay; plain dicts work but lose type reconstruction.
+
+```python
+@logram.trace
+def extract_quantities(page: Page) -> ExtractionResult:
+    ...
+    return ExtractionResult(tiles=tiles, totals=totals)
+    # replay returns an ExtractionResult instance, not a dict
+```
+
+### 3. Give custom objects a stable identity
+
+Arguments follow a different path from code. Primitives get stable content-based keys automatically; custom classes fall back to `repr()`, which often contains a memory address that changes every run and defeats replay. Implement `__logram_trace_key__`:
+
+```python
+class ImageTile:
+    def __logram_trace_key__(self):
+        return {"tile_id": self.tile_id}
+```
+
+At runtime, Logram detects address-based reprs and warns: `[PROBE 2][UNSTABLE_REPR] type=ImageTile … Fix: implement __logram_trace_key__ on this class.`
+
+### 4. Treat configuration as immutable within a run
+
+Constants are snapshotted when a function is first called in a run. A global mutated *inside* a traced function during a run is detected on the next run, not by later steps of the same run. Pass dynamic values as arguments, or manage shared mutable state with `@stateful`.
+
+### 5. Distributed execution
+
+Context variables, including the current `run_id`, do not cross process boundaries. Without intervention, worker processes write to a shared default run. Use `logram.worker_init` as the pool initializer:
+
+```python
+run_id = logram.init(project="my_pipeline", input_id="doc_42")
+
+with ProcessPoolExecutor(initializer=logram.worker_init, initargs=(run_id,)) as pool:
+    results = list(pool.map(process_tile, tiles))
+```
+
+`worker_init` sets the context in each worker without calling `logram.init()` again; the SQLite store is shared on disk and WAL mode handles concurrent writes. On Linux, where `fork` is the default, prefer `spawn` or `forkserver` to avoid sharing the parent's SQLite connection:
+
+```python
+import multiprocessing
+multiprocessing.set_start_method("spawn")
+```
+
+### 6. What triggers a re-run
+
+The Oracle errs on the side of re-execution rather than stale cache.
+
+**Invariant (no false invalidation)**
+
+- Comments, whitespace, blank lines, docstrings.
+- `black` / `ruff` reformatting.
+- Python minor-version upgrades. Complex constructs (f-strings, `match`, walrus) can show a small `ast.unparse` drift; run `clear_logic_snapshot_cache()` or delete `.logram/` to rebuild cleanly.
+- Renaming a parameter, adding a type annotation, reordering keyword arguments at a call site: either invariant, or invalidated only when the change is real.
+
+**Invalidates correctly**
+
+- Editing a function body (structural AST hash).
+- Changing a constant value (runtime global resolution).
+- Modifying a callee at any depth of the user-space call graph (Merkle aggregation).
+- Changing a method called through `self.method()` (MRO traversal).
+- Adding or removing `eval`, `exec` or dynamic `getattr` (volatility markers).
+
+**Known blind spots**
+
+<details>
+<summary><strong>Imports inside a function body</strong></summary>
+
+```python
+def fn(x):
+    import math            # local binding
+    return math.pi * x     # seen as __local__:math.pi, filtered
+```
+
+Constants from inline-imported modules are not captured as resolved globals. Editing the function itself still invalidates it; only changes to the imported module's constants are invisible. Move imports to the top of the file (as `ruff E402` also recommends).
+
+</details>
+
+<details>
+<summary><strong>Truly dynamic dispatch</strong>: <code>getattr(self, var_name)</code>, <code>globals()[key]</code></summary>
+
+The dispatch site is tracked through `<volatile:getattr_dyn>`, but the resolved callee depends on runtime data and is invisible to the Merkle tree. Make the dynamic element explicit in the cache key:
+
+```python
+@logram.trace(vcr_key_fn=lambda fn, args, kwargs: (args, kwargs, type(args[0]).__name__))
+async def dispatch_step(self, payload):
+    method = getattr(self, f"_handle_{payload.type}")
+    return await method(payload)
+```
+
+</details>
+
+<details>
+<summary><strong>Very deep call graphs</strong>: more than 256 user-space callees</summary>
+
+The callee Merkle tree is bounded at 256 unique user-space functions per traced step to keep hashing time predictable. Real pipelines reach 30–80. When the budget is hit, a `[Logram][oracle] callee budget exhausted` warning shows where it stopped. To raise it:
+
+```python
+import logram.oracle
+logram.oracle._CALLEE_BUDGET = 1024
+```
 
 </details>
 
 ---
 
-### Capabilities
+## Related tools
 
-| Capability | Status |
-|---|---|
-| AST-based, cross-Python-version stable hashing | ✅ |
-| MRO-aware OOP method resolution | ✅ |
-| SQLite WAL mode (concurrent access) | ✅ |
-| Content-addressed blob deduplication | ✅ |
-| MCP server for autonomous agents | ✅ |
-| Git-based semantic versioning | ✅ |
-| Golden dataset regression suite | In progress |
-| Web dashboard | In progress |
-| Cloud golden dataset sync | Roadmap |
-
----
-
-## Logram vs. The Alternatives
-
-Each tool below is excellent at what it does. Logram answers a different question: **how cheaply can I prove my fix works?**
+Each tool below is good at what it does; Logram answers a different question: *how cheaply can a fix be validated?*
 
 | | Logram | LangSmith / Langfuse | Dagster / Prefect | pytest + mocks |
 |---|---|---|---|---|
-| **Primary purpose** | Iteration speed | Observability / evals | Orchestration | Unit testing |
-| **Replay only changed logic** | ✅ | ❌ | ❌ | ❌ |
-| **Capture prompts at runtime** | ✅ | Partial | ❌ | ❌ |
-| **Stateful object replay** | ✅ | ❌ | ❌ | ❌ |
-| **Recursive logic diff (callee tree)** | ✅ | ❌ | ❌ | ❌ |
-| **MRO-aware method tracking** | ✅ | ❌ | ❌ | ❌ |
-| **Cross-Python-version stable hash** | ✅ | n/a | n/a | n/a |
-| **Native MCP agent interface** | ✅ | ❌ | ❌ | ❌ |
-| **100% local, no cloud required** | ✅ | ❌ | ✅ | ✅ |
-| **Cost to validate a fix** | **~$0.004** | ~$0.80 | ~$0.80 | $0 (mocked, not real) |
-| **Time to validate a fix** | **~2s** | ~4 min | ~4 min | seconds (mocked) |
+| Primary purpose | Iteration speed | Observability, evals | Orchestration | Unit testing |
+| Replay only changed logic | ✓ | – | – | – |
+| Capture prompts at runtime | ✓ | Partial | – | – |
+| Stateful object replay | ✓ | – | – | – |
+| Recursive logic diff over the call graph | ✓ | – | – | – |
+| MRO-aware method tracking | ✓ | – | – | – |
+| Cross-Python-version stable hash | ✓ | n/a | n/a | n/a |
+| Native MCP agent interface | ✓ | – | – | – |
+| Fully local | ✓ | – | ✓ | ✓ |
+| Cost to validate a fix (150-tile example) | ~$0.004 | ~$0.80 | ~$0.80 | $0 (mocked, not real) |
+| Time to validate a fix | ~2 s | ~4 min | ~4 min | seconds (mocked) |
 
-`pytest` validates a frozen surface. LangSmith records what happened. Logram is the only tool that lets you change one prompt and **prove** the new behavior in seconds, against the real LLM, on the real inputs.
+`pytest` validates a frozen surface and LangSmith records what happened; Logram lets you change one prompt and check the new behaviour against the real model, on the real inputs.
 
 ---
 
-## ⌨️ The CLI — A Full Debugging Workstation in Your Terminal
+## CLI reference
 
-Logram ships a first-class CLI built on [Typer](https://typer.tiangolo.com/) and [Rich](https://rich.readthedocs.io/). Every command renders in a styled terminal UI — step trees, syntax-highlighted code panels, unified diffs, progress bars, copy-to-clipboard — designed for the developer who spends their day in a terminal.
+The CLI is built on [Typer](https://typer.tiangolo.com/) and [Rich](https://rich.readthedocs.io/): step trees, syntax-highlighted code, unified diffs and progress bars in the terminal.
+
+| Command | Description |
+|---|---|
+| `logram list` | List runs with status, duration, relative time |
+| `logram inspect <run_id>` | Step tree with status badges (accepts `last`, `last-failed`, `-1`, `-2`…) |
+| `logram view <step_id>` | Inputs, output, error and blobs of one step |
+| `logram recover <logic_hash>` | Runtime source code and globals for a fingerprint |
+| `logram replay <script.py>` | Replay (`--force`, `--from`) |
+| `logram diff <run_a> <run_b>` | Code, globals, inputs, outputs (`--code`, `--globals`, `--inputs`, `--outputs`) |
+| `logram diff last` / `--ss` | Last run vs previous run / vs last success, same `input_id` |
+| `logram golden add <run_id>` | Mark a run as a reference |
+| `logram test <script.py>` | Regression test against reference runs |
+| `logram restore <run_id>` | Print copy-pasteable code blocks to revert to a run |
+| `logram stats` | Time, tokens and cost saved by replay |
+| `logram open <step_id>` | Open a step's image blob in the system viewer |
+| `logram clean` | Interactive cleanup of failed runs and orphan assets |
+| `logram doctor` | Environment check: Python, database, MCP wiring, orphan blobs |
+| `logram live` | Live step tree, polls every 500 ms (`--interval`) |
+| `logram ui` | Local web dashboard API server |
+| `logram mcp start` / `config` / `install` | Launch, print config for, or register the MCP server |
+
+<details>
+<summary><strong>Replay</strong>: <code>logram replay</code></summary>
+
+Reruns the pipeline with `LOGRAM_REPLAY=true`: unchanged steps replay, modified steps run live.
 
 ```bash
-pip install logram-sdk
-logram --help
+logram replay my_pipeline.py                            # standard replay
+logram replay my_pipeline.py --force call_vlm           # force one step live (invalidates its cache)
+logram replay my_pipeline.py --from extract_quantities  # run this step and everything downstream live
+logram replay my_pipeline.py -f step_a -f step_b        # force several steps live
 ```
 
-### ⏭️ Time Travel
+The CLI prints which steps are forced live, invalidates their cached rows before launching, streams the subprocess output, and ends with a success or failure badge and a hint for the next command.
 
-**`logram replay <script.py>`** — The core command. Reruns the pipeline with `LOGRAM_REPLAY=true`. Unchanged steps replay from cache instantly. Only modified steps execute live.
+</details>
+
+<details>
+<summary><strong>Diff</strong>: <code>logram diff</code></summary>
+
+Compares two runs across four dimensions and renders:
+
+1. a summary table, one row per step, with `logic_hash`, `source`, `globals` and `callees` marked `identical`, `changed` or `same`;
+2. unified diffs for every dimension that changed;
+3. a callee tree for steps whose deep dependencies changed (callee, depth, what changed).
 
 ```bash
-logram replay my_pipeline.py                       # standard replay
-logram replay my_pipeline.py --force call_vlm      # force one step live (invalidates its SUCCESS cache)
-logram replay my_pipeline.py --from extract_quantities   # cascade live from this step downward
-logram replay my_pipeline.py -f step_a -f step_b   # force multiple steps live
+logram diff run_20260425_142211 run_20260425_150033   # full diff
+logram diff last                                      # last run vs previous, same input_id
+logram diff --ss                                      # last run vs last success, same input_id
+logram diff <run_a> <run_b> --code                    # source only
+logram diff <run_a> <run_b> --globals                 # prompts and constants only
+logram diff <run_a> <run_b> --inputs                  # runtime inputs only
+logram diff <run_a> <run_b> --outputs                 # runtime outputs only
 ```
 
-The CLI prints a pre-run banner showing which steps are forced live, invalidates their cached rows from SQLite before launching, then streams the subprocess output directly. On completion, it shows a success/failure badge and hints for the next command.
-
-### 🔬 Diff & Analysis
-
-**`logram diff <run_a> <run_b>`** — The most powerful debugging command. Compares two runs across four dimensions simultaneously, then renders:
-
-1. A **summary table** — one row per step, with columns for `logic_hash`, `source`, `globals`, `callees` — each showing `identical` / `changed` / `same`
-2. **Git-style unified diffs** in Monokai panels for every dimension that changed
-3. A **callee tree** for steps where deep dependencies changed — showing callee name, depth, and what changed (source code vs. specific global key)
-
-```bash
-logram diff run_20260425_142211 run_20260425_150033          # full diff
-logram diff last                                             # last run vs previous (same input_id)
-logram diff --ss                                             # last run vs last SUCCESS (same input_id)
-logram diff <run_a> <run_b> --code                           # source code only
-logram diff <run_a> <run_b> --globals                        # prompts and constants only
-logram diff <run_a> <run_b> --inputs                         # runtime inputs only
-logram diff <run_a> <run_b> --outputs                        # runtime outputs only
-```
-
-**`lg diff last`** automatically finds the previous run for the same `input_id`, so you always compare apples to apples. **`lg diff --ss`** compares the most recent run against the most recent SUCCESS for the same input — the fastest way to pinpoint what broke.
-
-Example output for a prompt change buried in a callee:
 ```text
 diff  ·  run_a → run_b
 
-step              logic_hash   source      globals     callees
-extract_quantities  changed     same       same        build_prompt +1
-...
+step                logic_hash   source   globals   callees
+extract_quantities  changed      same     same      build_prompt +1
 
 callee tree  ·  extract_quantities  ·  2 node(s) changed
 └── build_prompt  depth 1  globals:EXTRACTION_PROMPT_V3
     └── extract_quantities → build_prompt
 ```
 
----
+</details>
 
 <details>
-<summary><b>🔍 Investigation (list, inspect, view, recover)</b></summary>
-
-**`logram list`** — Browse all pipeline runs, newest first.
-```bash
-logram list                          # all runs
-logram list --project my_agent       # filter by project
-logram list --group-by-input         # group by document/input_id
-logram list --copy-field run_id --copy-index 1   # copy first run_id to clipboard
-```
-
-**`logram inspect <run_id>`** — Render the full execution tree of a run as a Rich tree, with per-step status badges, durations (color-coded: fast / slow), and a footer showing total live time vs. replayed steps. All commands that accept a `run_id` also accept smart shorthands — no copy-pasting long IDs required:
+<summary><strong>Investigation</strong>: <code>list</code>, <code>inspect</code>, <code>view</code>, <code>recover</code></summary>
 
 ```bash
+logram list                                      # all runs, newest first
+logram list --project my_agent                   # filter by project
+logram list --group-by-input                     # group by input_id
+logram list --copy-field run_id --copy-index 1   # copy the first run_id to the clipboard
+
 logram inspect last          # most recent run
 logram inspect last-failed   # most recent failed run (alias: fail)
-logram inspect -1            # most recent  (-2 = second-to-last, -3 = third…)
+logram inspect -1            # most recent (-2 = second-to-last, …)
 ```
 
-Tab-completion (`logram --install-completion`) fills in real run IDs from the DB alongside the shorthands.
+Tab completion (`logram --install-completion`) suggests real run IDs alongside the shorthands.
+
 ```text
 my_agent  ·  2026-04-25 14:22:11  ·  success
 
 my_agent
-├── ✓ load_pdf           0.012s   SUCCESS
-├── ✓ split_tiles        0.044s   SUCCESS
-├── ⏭ call_vlm          [×150]   REPLAYED
-├── ✗ extract_quantities 1.201s   FAILED
-└── · aggregate_results  —        SKIPPED
+├── ✓ load_pdf            0.012s   SUCCESS
+├── ✓ split_tiles         0.044s   SUCCESS
+├── ⏭ call_vlm           [×150]   REPLAYED
+├── ✗ extract_quantities  1.201s   FAILED
+└── · aggregate_results   —        SKIPPED
 
 Total: 1.26s   Live: 1.26s   Replayed: 150 steps
 ```
 
-**`logram view <step_id>`** — Full detail for one step: inputs, output, error — all syntax-highlighted as JSON in Monokai panels. Binary outputs are listed as a blob table with hash, size, and asset path.
+`logram view <step_id>` shows inputs, output and error as highlighted JSON, with binary outputs listed by hash, size and path. `logram recover <logic_hash>` shows the exact source and globals that were active for a fingerprint: what actually ran, not what the file says today.
 
-**`logram recover <logic_hash>`** — Read the **exact code and prompts** that were active at runtime for any logic hash. Syntax-highlighted Python source and JSON globals, side by side. This is your ground truth — what the pipeline actually ran, not what the file says today.
-```bash
-logram recover 3f9a2c8e1d04...
-```
 </details>
 
 <details>
-<summary><b>🏅 Quality & Regression (golden, test, restore)</b></summary>
+<summary><strong>Regression</strong>: <code>golden</code>, <code>test</code>, <code>restore</code></summary>
 
-**`logram golden add <run_id>`** — Tag any validated run as a GOLDEN reference. Golden runs serve as behavioral baselines for regression testing.
 ```bash
 logram golden add run_20260425_142211
-# ✓ golden    run_20260425_142211
+logram test my_pipeline.py
 ```
 
-**`logram test <script.py>`** — Run the pipeline against every GOLDEN-tagged input and compare outputs. Produces a regression report table. Exit code 1 on any regression — CI-friendly.
-```bash
-logram test my_pipeline.py
-
+```text
 golden test  ·  my_pipeline.py  ·  3 input(s)
 
-input_id          baseline         new run          result    details
+input_id          baseline         new run          result     details
 doc_invoice_42    run_20260420...  run_20260425...  ✓ SUCCESS  no regression
 doc_invoice_87    run_20260420...  run_20260425...  ✗ FAILED   2 step(s) differ
 doc_invoice_103   run_20260420...  run_20260425...  ✓ SUCCESS  no regression
 ```
 
-**`logram restore <run_id>`** — Emergency rollback helper. Renders all source code blocks and global snapshots from a run as copy-pasteable panels, so you can manually revert a function to the exact logic that ran in a known-good execution.
+`logram test` exits with code 1 on any regression, so it can run in CI. `logram restore <run_id>` prints all source blocks and global snapshots of a run as copy-pasteable panels, to revert a function manually to a known-good state.
+
 </details>
 
 <details>
-<summary><b>📊 ROI & Metrics (stats)</b></summary>
+<summary><strong>Metrics</strong>: <code>stats</code></summary>
 
-**`logram stats`** — A real-time ROI dashboard scoped to global / project / input / run. Renders three tables and progress bars:
 ```bash
-logram stats                            # global across all projects
-logram stats --project my_agent         # scoped to a project
-logram stats <run_id>                   # scoped to one run
-logram stats --hourly-rate 150          # customize dev rate for financial estimate
+logram stats                         # global
+logram stats --project my_agent      # one project
+logram stats <run_id>                # one run
+logram stats --hourly-rate 150       # custom rate for the cost estimate
 ```
 
 ```text
@@ -684,60 +675,26 @@ stats  ·  global  ·  47 run(s)  ·  6 820 steps (6 521 replayed)
 
 metric                  value
 Resource time saved     2h 14m 33s
-Human wait saved        2h 14m 33s
 Total compute time      2h 21m 08s
 Efficiency ratio        95.3%
 Financial gain (est.)   33.60 €
-
-indicator                bar                                    ratio
-wait saved / total       ████████████████████████████████████   95.3%
-replayed (duration)      ███████████████████████████████████    94.6%
-replayed (steps)         ████████████████████████████████████   95.6%
 
 tokens              value
 Spent (live)        124 820
 Saved (cache)       2 643 100
 Bypass rate         95.5%
-Total               2 767 920
 ```
+
 </details>
 
 <details>
-<summary><b>🤖 Agent Autonomy (mcp start, mcp config)</b></summary>
+<summary><strong>Maintenance and UI</strong>: <code>clean</code>, <code>open</code>, <code>ui</code>, <code>doctor</code>, <code>live</code></summary>
 
-**`logram mcp start`** — Launch the MCP server in stdio mode. Used by Claude Desktop, Cursor, or any MCP-compatible agent to autonomously debug your pipelines.
-
-**`logram mcp config`** — Print the exact JSON block to paste into your IDE's MCP configuration. Automatically resolves the Python binary and database path.
-```bash
-logram mcp config
-```
-```json
-{
-  "logram": {
-    "command": "/usr/local/bin/python3",
-    "args":["-m", "logram.mcp_server"],
-    "env": {
-      "LOGRAM_DB_PATH": "/path/to/project/.logram/logram.db"
-    }
-  }
-}
-```
-</details>
-
-<details>
-<summary><b>🧹 Maintenance & UI (clean, open, ui, doctor, live)</b></summary>
-
-**`logram clean`** — Interactive cleanup wizard. Lists failed runs and orphan blob assets (files in `.logram_assets/` not referenced by any step output), then prompts before deleting anything.
-
-**`logram open <step_id>`** — Opens the image blob from a step's output directly in your system viewer (`open` on macOS, `xdg-open` on Linux). Useful for inspecting what a VLM actually saw.
-
-**`logram ui`** — Launches a local FastAPI read-only server for the web dashboard (when available).
-```bash
-logram ui                              # http://127.0.0.1:8000, opens browser
-logram ui --port 9000 --no-open-browser
-```
-
-**`logram doctor`** — Environment health check. Produces an 8-row status table covering Python version, Logram SDK installation, `.logram/` directory and database, MCP wiring for Claude Code, Claude Desktop, and Cursor, and a cleanup summary (failed runs + orphan blobs). Run this first when something seems off.
+- `logram clean` lists failed runs and orphan blobs (assets no longer referenced by any step) and asks before deleting.
+- `logram open <step_id>` opens a step's image blob in the system viewer, useful to see what a VLM actually received.
+- `logram ui` launches a local read-only FastAPI server for the web dashboard (`--port`, `--no-open-browser`).
+- `logram doctor` checks Python version, SDK installation, the `.logram/` directory and database, MCP wiring for Claude Code, Claude Desktop and Cursor, and pending cleanup.
+- `logram live` shows a live-updating step tree of the running pipeline (`--interval`, minimum 100 ms); run it in a split terminal.
 
 ```text
 logram doctor
@@ -753,303 +710,120 @@ logram doctor
   Cleanup              ⚠ warn     3 failed run(s) · 1 orphan blob(s)
 ```
 
-**`logram live`** — Real-time terminal dashboard. Polls the database every 500ms and renders a live-updating step tree with a spinner during active runs, or "Waiting for new run…" when idle. Start it in a split terminal while running your pipeline.
-
-```bash
-logram live                  # default 500ms polling
-logram live --interval 250   # faster polling (min 100ms)
-```
-
-Press `Ctrl-C` to exit cleanly.
 </details>
 
 ---
 
-### Complete Command Reference
-
-| Command | Description |
-|---|---|
-| `logram list` | List all runs with status, duration, relative time |
-| `logram inspect <run_id>` | Step execution tree with status badges (accepts `last`, `last-failed`, `-1`, `-2`…) |
-| `logram view <step_id>` | Full step detail: inputs, output, error, blobs |
-| `logram recover <logic_hash>` | Runtime source code + globals for any logic hash |
-| `logram replay <script.py>` | Time-travel replay (`--force`, `--from`) |
-| `logram diff <run_a> <run_b>` | Full diff: code, globals, inputs, outputs (`--code`, `--globals`, `--inputs`, `--outputs`) |
-| `logram diff last` | Diff last run vs previous run (same `input_id`) |
-| `logram diff --ss` | Diff last run vs last SUCCESS (same `input_id`) |
-| `logram golden add <run_id>` | Tag a run as a GOLDEN regression baseline |
-| `logram test <script.py>` | Regression test against all GOLDEN inputs |
-| `logram restore <run_id>` | Print copy-pasteable code blocks to revert a run |
-| `logram stats` | ROI dashboard: time saved, token bypass rate, financial gain |
-| `logram open <step_id>` | Open a step's image blob in system viewer |
-| `logram clean` | Interactive cleanup of failed runs and orphan assets |
-| `logram doctor` | Environment health check: Python, DB, MCP wiring, orphan blobs |
-| `logram live` | Real-time step-tree dashboard, polls every 500ms (`--interval` to adjust) |
-| `logram ui` | Launch local web dashboard API server |
-| `logram mcp start` | Launch MCP server (stdio) for agent integration |
-| `logram mcp config` | Print MCP config JSON for Cursor / Claude Desktop |
-
----
-
-## Design Philosophy: Iteration, Not Monitoring
-
-Most observability tools are built for production monitoring: they surface anomalies and alert you when a deployed system breaks. This is essential for maintenance, but it doesn't help you build a better system.
-
-Logram targets the development cycle. In AI engineering, the primary bottleneck to both optimizing performance and fixing logic is the cumulative cost of verifying changes.
-
-Whether you are trying to improve a prompt's accuracy by 5%, switch to a more cost-effective model, or squash a regression, the "tax" on your curiosity is the same: the minutes of latency and the API costs required to re-execute successful upstream steps just to reach the logic you are currently tuning.
-
-Logram collapses this tax. By reducing the cost of verification to 2 seconds and $0.004 through surgical replay, Logram transforms the engineering process:
-
-- **Rapid Prototyping:** Test multiple prompt variants or logic structures against the same historical context in minutes, not hours.
-- **Data-Driven Optimization:** Tune your sub-functions using real historical inputs as a sandbox, ensuring upgrades are backed by empirical evidence.
-- **Regression-Free Upgrades:** Verify that an optimization for one edge case doesn't degrade performance on previous golden successes.
-
-Monitoring observes the past. Logram enables you to engineer a higher-performing future.
-
----
-
-## Advanced Usage
-
-### VCR Cache Control
+## Advanced usage
 
 <details>
-<summary><strong><code>vcr_key_fn</code></strong> — Custom cache key function</summary>
+<summary><strong><code>vcr_key_fn</code></strong>: custom cache key</summary>
 
-**Why:** By default, Logram hashes all named arguments to build the VCR cache key. This works perfectly for primitive arguments (strings, ints, dicts). The problem with custom objects is **false cache misses**: if an argument contains fields that change between runs but don't affect the output (an internal counter, a timestamp embedded in the object), the key changes every run and replay never hits. Use `vcr_key_fn` to pin the key to the subset of fields that actually define identity. The other common case is **third-party objects you can't modify**: you can't add `__logram_trace_key__` to `langchain.Document`, but you can define a key extractor at the call site.
-
-**When:** Use `vcr_key_fn` when the default key produces false cache misses (irrelevant fields change between runs), or when the argument type belongs to a library you don't control.
+By default, all named arguments enter the cache key. For custom objects this can cause **false misses**: fields that change between runs without affecting the output (a counter, an embedded timestamp) change the key every time. `vcr_key_fn` pins the key to the fields that define identity. It is also the only option for third-party classes you cannot modify.
 
 ```python
-# Own class: pin the key to identity fields only.
-# args[0] = self, args[1] = tile (raw positional args, before any binding).
-@logram.trace(
-    vcr_key_fn=lambda func, args, kwargs: (
-        {"tile_id": args[1].tile_id, "page": args[1].page_number},
-        {}
-    )
-)
+# Own class: key on identity fields only (args[0] = self, args[1] = tile)
+@logram.trace(vcr_key_fn=lambda func, args, kwargs: (
+    {"tile_id": args[1].tile_id, "page": args[1].page_number}, {}
+))
 async def process_tile(self, tile: ImageTile) -> dict:
-    # Cache key = tile_id + page_number only.
-    # The 80KB image_bytes are NOT part of the key — tile_id is a stable proxy.
-    ...
+    ...  # the 80 KB image_bytes are not part of the key
 
-
-# Third-party class: vcr_key_fn is the only option when you can't touch the class.
+# Third-party class
 from langchain.schema import Document
 
-@logram.trace(
-    vcr_key_fn=lambda func, args, kwargs: (
-        {"page_content": args[0].page_content},
-        {}
-    )
-)
+@logram.trace(vcr_key_fn=lambda func, args, kwargs: ({"page_content": args[0].page_content}, {}))
 def extract_entities(doc: Document) -> list[str]: ...
 ```
 
-The function receives `(func, args, kwargs)` where `args` contains all positional arguments as-is — including `self` for methods (`args[0]`). Returns `(vcr_args, vcr_kwargs)`; a single return value is also accepted and paired with `{}` automatically. Only the returned values enter the hash.
+The function receives `(func, args, kwargs)`, with positional arguments as-is (including `self`), and returns `(vcr_args, vcr_kwargs)`; a single return value is paired with `{}`.
 
 </details>
 
----
-
 <details>
-<summary><strong><code>ignore_in_hash</code></strong> — Exclude volatile arguments</summary>
+<summary><strong><code>ignore_in_hash</code></strong>: exclude volatile arguments</summary>
 
-**Why:** Some arguments are semantically irrelevant to the output but change on every call: request IDs, timestamps, correlation tokens, logging contexts. Including them in the hash guarantees a cache miss on every replay, which defeats the entire purpose.
-
-**When:** Use `ignore_in_hash` whenever a function argument exists for observability or routing purposes and has no effect on the function's output. If removing it from the hash would never cause a wrong cache hit, exclude it.
+Request IDs, timestamps and tracing contexts change on every call without affecting the output; leaving them in the key guarantees a miss.
 
 ```python
 @logram.trace(ignore_in_hash=["timestamp", "request_id", "trace_ctx"])
-async def classify(self, text: str, timestamp: float, request_id: str) -> str:
-    # Cache key = text only.
-    # timestamp and request_id change every call but don't affect the LLM output.
-    ...
+async def classify(self, text: str, timestamp: float, request_id: str) -> str: ...
 ```
 
-**Diagnostic:** If a step that should replay keeps running live, check the log for `[PROBE 3][HashComponents]`. If `COMPONENT_args_repr` differs between runs on a field that shouldn't matter, add it to `ignore_in_hash`.
+**Diagnostic:** if a step keeps running live in replay mode, look for `[PROBE 3][HashComponents]` in the logs. A field of `COMPONENT_args_repr` that differs between runs but should not matter belongs in `ignore_in_hash`.
 
 </details>
 
----
-
 <details>
-<summary><strong><code>compact_inputs=False</code></strong> — Full-fidelity input logging</summary>
+<summary><strong><code>compact_inputs=False</code></strong>: full-fidelity input logging</summary>
 
-**Why:** By default, Logram compacts large inputs before storing them in the trace (strings over 220 chars are hashed, lists are truncated at 16 items). This keeps the SQLite store lean. But it means `logram view <step_id>` shows a truncated representation, not the real data.
-
-**When:** Disable compaction for steps where you need to inspect the full runtime input in the CLI — for example, the step that receives the raw LLM prompt, or a step that processes a structured JSON payload you need to audit.
+Large inputs are compacted by default (strings over 220 characters are hashed, lists truncated at 16 items), which keeps the store small but makes `logram view` show a truncated view. Disable compaction on steps whose full input you need to audit, such as the one receiving the raw prompt:
 
 ```python
 @logram.trace(compact_inputs=False)
-async def send_to_llm(self, prompt: str, context: dict) -> str:
-    # Full prompt and context stored verbatim in the trace.
-    # logram view <step_id> shows the complete payload.
-    ...
+async def send_to_llm(self, prompt: str, context: dict) -> str: ...
 ```
 
-**Trade-off:** Larger SQLite rows. Use selectively on diagnostic steps, not on every function in a high-throughput pipeline.
+Trade-off: larger rows; use it on diagnostic steps, not everywhere.
 
 </details>
 
----
-
 <details>
-<summary><strong><code>log_input_fn</code></strong> — Custom input serialization for the trace log</summary>
+<summary><strong><code>log_input_fn</code></strong>: custom input logging</summary>
 
-**Why:** Sometimes you want the stored inputs to be a richer or more focused representation than what the default serializer produces — for example, a human-readable summary instead of a raw object dump, or a reduced view that omits binary fields.
-
-**When:** Use `log_input_fn` when `logram view` shows inputs that are unhelpful for debugging (all `<Binary Data>`, or a deeply nested object where only two fields matter).
+Stores a focused or human-readable summary of the inputs instead of the default serialization. It affects display only, not the cache key (use `vcr_key_fn` for that).
 
 ```python
 def _summarize_tile_input(func, args, kwargs):
     tile = kwargs.get("tile")
-    return {
-        "tile_id": tile.tile_id,
-        "page": tile.page_number,
-        "bbox": tile.bbox,
-        "image_size_kb": len(tile.image_bytes) // 1024,
-    }
+    return {"tile_id": tile.tile_id, "page": tile.page_number,
+            "bbox": tile.bbox, "image_size_kb": len(tile.image_bytes) // 1024}
 
 @logram.trace(log_input_fn=_summarize_tile_input)
-async def process_tile(self, tile: ImageTile) -> dict:
-    ...
-```
-
-`log_input_fn` only affects what is stored for display. It does not affect the VCR cache key (use `vcr_key_fn` for that).
-
-</details>
-
----
-
-### State Management
-
-<details>
-<summary><strong><code>@logram.stateful(include=[...])</code></strong> — Declare tracked instance attributes</summary>
-
-**Why:** Standard VCR caching assumes pure functions: same inputs → same output. A pipeline implemented as a class with mutable attributes violates this assumption. If `self.page_map` changes between two calls to `process_tile`, the second call may get a wrong cached output that was computed with an empty `page_map`.
-
-**When:** Use `@stateful` on any class whose methods accumulate state across traced calls — accumulators, registries, caches built up across a tile loop.
-
-```python
-@logram.stateful(include=["results", "page_map", "ocr_cache"])
-class DocumentPipeline:
-    def __init__(self):
-        self.results = {}
-        self.page_map = {}
-        self.ocr_cache = {}
-```
-
-Logram snapshots the listed attributes **before and after** every traced method call. On replay, it restores the exact delta before returning the cached result, so the next step receives the accumulated state it would have seen in a live run.
-
-> **Decoupled from the Oracle.** The state snapshot is a separate component of the cache key, not part of the logic fingerprint. Code changes invalidate via the Oracle; state changes invalidate via `@stateful`. The two channels never overlap.
-
-</details>
-
----
-
-<details>
-<summary><strong><code>state_in_hash</code></strong> — Control whether state enters the VCR key</summary>
-
-**Why:** By default, the state snapshot is included in the VCR cache key. This is correct for most cases: the same function called twice with the same arguments but different accumulated state should produce different results. But for stateless utility methods on a stateful class, including the state bloats the key and risks unnecessary cache misses.
-
-**When:** Set `state_in_hash=False` for methods that are pure with respect to instance state — helper functions that only depend on their arguments.
-
-```python
-@logram.trace(state_in_hash=False)
-async def format_output(self, raw: dict) -> str:
-    # This method never reads self.* — state is irrelevant to its output.
-    ...
+async def process_tile(self, tile: ImageTile) -> dict: ...
 ```
 
 </details>
 
----
-
 <details>
-<summary><strong><code>include_state</code> / <code>exclude_state</code></strong> — Fine-grained state field selection per method</summary>
+<summary><strong><code>@logram.stateful</code>, <code>state_in_hash</code>, <code>include_state</code>, <code>exclude_state</code></strong>: state control</summary>
 
-**Why:** `@stateful(include=[...])` declares the full set of fields the class tracks. But individual methods may only care about a subset. Including irrelevant state fields in a method's VCR key increases the risk of false cache misses when those fields change for unrelated reasons.
-
-**When:** Use `include_state` to restrict the state hash to only the fields a specific method actually reads. Use `exclude_state` to remove one field from the default set without listing all others.
+`@stateful(include=[...])` declares the attributes a class accumulates across traced calls; they are snapshotted before and after each call and restored on replay. By default the state enters the cache key, which is correct when the same arguments with different state can give different results.
 
 ```python
 @logram.stateful(include=["results", "page_map", "ocr_cache", "font_registry"])
 class DocumentPipeline:
 
-    @logram.trace(include_state=["page_map"])
-    async def resolve_page(self, page_id: int) -> dict:
-        # Only page_map matters for this method's output.
-        # results, ocr_cache, font_registry are excluded from the key.
-        ...
+    @logram.trace(include_state=["page_map"])       # only page_map enters this key
+    async def resolve_page(self, page_id: int) -> dict: ...
 
-    @logram.trace(exclude_state=["font_registry"])
-    async def extract_text(self, tile: ImageTile) -> str:
-        # All fields except font_registry enter the key.
-        ...
+    @logram.trace(exclude_state=["font_registry"])  # all fields except font_registry
+    async def extract_text(self, tile: ImageTile) -> str: ...
+
+    @logram.trace(state_in_hash=False)              # method never reads self.*
+    async def format_output(self, raw: dict) -> str: ...
 ```
 
 </details>
 
----
-
 <details>
-<summary><strong><code>track_args</code></strong> — Track mutable argument mutations</summary>
+<summary><strong><code>track_args</code></strong>: in-place argument mutations</summary>
 
-**Why:** Some pipeline steps receive a mutable container (a dict, a list) and modify it in-place rather than returning a value. Standard VCR replay returns `None` (the cached return value) but doesn't restore the mutations to the container — leaving downstream steps with the wrong data.
-
-**When:** Use `track_args` whenever a traced function modifies a mutable argument in-place and that mutation is load-bearing for subsequent steps.
+A step that fills a mutable argument and returns `None` would replay `None` without restoring the mutation, leaving downstream steps with wrong data. `track_args` stores and restores the delta, through the same `values_registry` as `@stateful`.
 
 ```python
 @logram.trace(track_args=["accumulator"])
 async def aggregate_results(self, items: list, accumulator: dict) -> None:
     for item in items:
         accumulator[item["id"]] = item["value"]
-    # Return value is None, but accumulator is now populated.
-    # Logram stores the delta and restores it on replay.
 ```
-
-On replay, Logram restores `accumulator` to the state it was in after the live call, using the same `values_registry` mechanism as `@stateful`.
 
 </details>
 
----
-
-### Object Identity Protocols
-
 <details>
-<summary><strong><code>__logram_trace_key__</code></strong> — Stable cache identity for custom objects</summary>
+<summary><strong><code>__logram_trace_key__</code> and <code>__logram_trace_log__</code></strong>: object identity protocols</summary>
 
-**Why:** Logram builds the VCR cache key by running each argument through a compaction chain. Primitives (`str`, `int`, `dict`, `list`), dataclasses, and Pydantic models all produce stable, content-based keys automatically. For plain custom classes, the chain reaches its last resort: `repr()`. Python's default `repr()` returns `<ImageTile object at 0x7f3a2c>` — the address changes every run, so every call looks like a fresh input and replay never hits.
-
-**When:** Implement `__logram_trace_key__` on any class that is passed as an argument to a traced function and does not have a stable, content-based representation. This is the most common cause of unexpected cache misses on custom object types.
-
-**Diagnostic:** Look for `[PROBE 2][UNSTABLE_REPR]` warnings in your logs. If you see `repr() contains a memory address`, that class needs this protocol.
-
-```python
-class ImageTile:
-    def __logram_trace_key__(self):
-        # Returns a stable, serializable dict that uniquely identifies this tile.
-        return {
-            "tile_id": self.tile_id,
-            "page": self.page_number,
-            "bbox": self.bbox,
-        }
-```
-
-The returned value replaces the full object in the cache key. It must be stable across runs (no memory addresses, no timestamps) and must change when the tile's logical identity changes.
-
-</details>
-
----
-
-<details>
-<summary><strong><code>__logram_trace_log__</code></strong> — Custom display representation in trace logs</summary>
-
-**Why:** `__logram_trace_key__` controls the cache key. `__logram_trace_log__` controls what is stored and displayed in the trace for human inspection (`logram view`, `logram diff`). Sometimes the most useful display representation is different from the identity key — you might want to include more context for debugging without affecting caching.
-
-**When:** Implement `__logram_trace_log__` when `logram view` shows unhelpful representations of your custom objects, or when you want richer diagnostic data in the trace without changing cache behavior.
+`__logram_trace_key__` controls the cache key of a custom object; `__logram_trace_log__` controls what is stored and displayed (`logram view`, `logram diff`) without affecting caching. If only the first is defined, it is used for both.
 
 ```python
 class ImageTile:
@@ -1057,76 +831,40 @@ class ImageTile:
         return {"tile_id": self.tile_id, "page": self.page_number}
 
     def __logram_trace_log__(self):
-        # Richer representation for display — includes size context.
-        return {
-            "tile_id": self.tile_id,
-            "page": self.page_number,
-            "bbox": self.bbox,
-            "image_size_kb": len(self.image_bytes) // 1024,
-            "grid_tag": self.grid_tag,
-        }
+        return {"tile_id": self.tile_id, "page": self.page_number, "bbox": self.bbox,
+                "image_size_kb": len(self.image_bytes) // 1024, "grid_tag": self.grid_tag}
 ```
 
-If only `__logram_trace_key__` is defined, it is used for both cache key and display. Define `__logram_trace_log__` separately when you want a richer display without affecting the key.
+The key must be stable across runs (no addresses, no timestamps) and change when the object's logical identity changes.
 
 </details>
 
----
-
-### Run Lifecycle
-
 <details>
-<summary><strong><code>logram.init()</code> with <code>tags</code></strong> — Tagging runs for filtering and golden marking</summary>
+<summary><strong>Run lifecycle</strong>: tags, <code>flush</code>, <code>finalize</code></summary>
 
-**Why:** Tags let you categorize runs beyond project and input_id. The `GOLDEN` tag is the mechanism behind `logram golden add` and `logram test`. You can also define custom tags for your own filtering needs.
-
-**When:** Pass `tags` at init time when you want to mark a run programmatically — for example, in a CI pipeline that automatically tags passing runs as golden, or to mark runs by environment (`staging`, `prod`).
+Tags categorize runs; `GOLDEN` is the tag behind `logram golden add` and `logram test`.
 
 ```python
-run_id = logram.init(
-    project="invoice_agent",
-    run_name="batch_run",
-    input_id=document_id,
-    tags=["GOLDEN", "staging", "v2-prompt"],
-)
-```
-
-</details>
-
----
-
-<details>
-<summary><strong><code>logram.flush()</code> and <code>logram.finalize()</code></strong> — Explicit lifecycle control</summary>
-
-**Why:** Logram writes to SQLite asynchronously via a background thread. In short-lived scripts, the process may exit before the background thread has flushed the queue. `finalize()` closes the run, computes ROI metrics, and waits for all pending writes. `flush()` forces persistence without closing the run.
-
-**When:** Always call `await logram.finalize()` at the end of a pipeline script. Call `await logram.flush()` at intermediate checkpoints in long-running pipelines where you want data persisted even if the process is interrupted.
-
-```python
-run_id = logram.init(project="my_agent", input_id=doc_id)
+run_id = logram.init(project="invoice_agent", run_name="batch_run",
+                     input_id=document_id, tags=["GOLDEN", "staging", "v2-prompt"])
 try:
     await run_pipeline()
     await logram.finalize(status="success", metrics={"pages": 12})
-except Exception as e:
+except Exception:
     await logram.finalize(status="failed")
     raise
 ```
 
-`finalize()` also accepts a `metrics` dict that is stored on the run and displayed by `logram stats`.
+Writes are asynchronous, so short scripts can exit before the queue is flushed: always call `finalize()`, which closes the run, computes metrics and waits for pending writes. `flush()` persists without closing, for checkpoints in long pipelines. Metrics passed to `finalize()` appear in `logram stats`.
 
 </details>
 
----
-
 <details>
-<summary><strong><code>logram.bind_session_run()</code> / <code>@logram.with_session_run()</code></strong> — Web server integration</summary>
+<summary><strong>Web servers and external run IDs</strong>: <code>bind_session_run</code>, <code>with_session_run</code>, <code>set_run_id</code></summary>
 
-**Why:** In a FastAPI or similar async web server, each request has a session object with a unique ID. You want each request's pipeline execution to be traced as a separate Logram run, with a stable run ID derived from the session — not a random UUID that changes on retry.
-
-**When:** Use `bind_session_run()` at the start of a request handler, or decorate the handler with `@with_session_run()` to bind automatically from a session argument.
+In a FastAPI-style server, each request can be traced as its own run with a stable ID derived from the session rather than a random UUID:
 
 ```python
-# Manual binding in a FastAPI route
 @app.post("/analyze")
 async def analyze(session: Session = Depends(get_session)):
     logram.bind_session_run(session, prefix="analyze", session_id_attr="id")
@@ -1134,298 +872,83 @@ async def analyze(session: Session = Depends(get_session)):
     await logram.finalize(status="success")
     return result
 
-# Decorator approach — binds automatically from the `session` argument
 @logram.with_session_run(prefix="analyze", session_id_attr="id")
-async def analyze(session: Session):
-    ...
+async def analyze(session: Session): ...
+
+# Custom resolver for any session shape
+logram.bind_session_run(session, resolver=lambda s: f"req_{s.correlation_id}_{s.user_id}")
 ```
 
-A custom `resolver` function can be passed to derive the run ID from any session shape:
+When the run ID comes from an orchestrator or job queue:
 
 ```python
-logram.bind_session_run(
-    session,
-    resolver=lambda s: f"req_{s.correlation_id}_{s.user_id}",
-)
+logram.set_run_id(f"job_{os.environ['JOB_ID']}", verbose=True)
 ```
 
 </details>
 
----
-
 <details>
-<summary><strong><code>logram.set_run_id()</code></strong> — Manual run ID control</summary>
+<summary><strong><code>LOGRAM_FORCE_STEP</code> and <code>LOGRAM_FORCE_FROM</code></strong>: replay control</summary>
 
-**Why:** In some architectures, the run ID is determined externally — by an orchestrator, a job queue, or a parent process. You want Logram's trace to use that ID so runs are correlated across systems.
-
-**When:** Use `set_run_id()` when you have an externally assigned execution ID and want Logram traces to be addressable by it.
-
-```python
-# Received from an external job queue
-external_job_id = os.environ["JOB_ID"]
-logram.set_run_id(f"job_{external_job_id}", verbose=True)
-```
-
-</details>
-
----
-
-### Replay Control
-
-<details>
-<summary><strong><code>LOGRAM_FORCE_STEP</code></strong> — Force a single successful step to re-execute live</summary>
-
-**Why:** When a step completed successfully in a previous run, Logram caches its output. If you want to rerun that specific step — because you changed its logic — you must invalidate its cache entry. `LOGRAM_FORCE_STEP` does this by name.
-
-**When:** Use when a step has a cached `SUCCESS` entry that is now stale. **Do not use for `FAILED` steps** — they have no cache entry and always run live automatically. Using `LOGRAM_FORCE_STEP` on a failed step triggers the MCP Logic Guard and aborts.
+`LOGRAM_FORCE_STEP` invalidates the cached success of named steps so they run live. Do not use it on failed steps: they have no cache entry and already run live, and doing so triggers the MCP logic guard. `LOGRAM_FORCE_FROM` runs a step and everything downstream live, while still replaying everything upstream.
 
 ```bash
-# Via environment variable
 LOGRAM_REPLAY=true LOGRAM_FORCE_STEP=call_vlm python my_pipeline.py
-
-# Via CLI (handles cache invalidation automatically)
-logram replay my_pipeline.py --force call_vlm
-logram replay my_pipeline.py --force call_vlm --force extract_quantities  # multiple steps
-```
-
-</details>
-
----
-
-<details>
-<summary><strong><code>LOGRAM_FORCE_FROM</code></strong> — Cascade live execution from a step</summary>
-
-**Why:** When a change affects a step and all downstream steps depend on its output, forcing only one step live is insufficient — the downstream steps would replay stale cached outputs. `LOGRAM_FORCE_FROM` runs the named step and every step that follows it live, while still replaying everything before it from cache.
-
-**When:** Use when your fix affects a step that is not at the end of the pipeline, and downstream steps need to process the new output. More surgical than a full re-run, more complete than `LOGRAM_FORCE_STEP`.
-
-```bash
 LOGRAM_REPLAY=true LOGRAM_FORCE_FROM=extract_quantities python my_pipeline.py
-
-# Via CLI
-logram replay my_pipeline.py --from extract_quantities
 ```
-
-**`FORCE_STEP` vs `FORCE_FROM` at a glance:**
 
 | | `FORCE_STEP` | `FORCE_FROM` |
 |---|---|---|
-| Target step | Runs live | Runs live |
-| Upstream steps | Replay from cache | Replay from cache |
-| Downstream steps | Replay from cache | Run live (cascade) |
-| Use when | Isolated fix, output unchanged for downstream | Fix changes downstream data |
+| Target step | Live | Live |
+| Upstream steps | Replayed | Replayed |
+| Downstream steps | Replayed | Live |
+| Use when | The fix does not change the step's output for downstream steps | The fix changes data consumed downstream |
 
 </details>
 
----
-
-### Environment Variables Reference
+<details>
+<summary><strong>Environment variables</strong></summary>
 
 | Variable | Default | Description |
 |---|---|---|
-| `LOGRAM_REPLAY` | `""` | Set to `"true"` to enable replay mode. All steps with a cached `SUCCESS` entry replay from cache. |
-| `LOGRAM_FORCE_STEP` | `""` | Comma-separated step names to force live in replay mode. Invalidates their SUCCESS cache entry. |
-| `LOGRAM_FORCE_FROM` | `""` | Step name from which to cascade live execution. This step and all downstream steps run live. |
-| `LOGRAM_DB_PATH` | `.logram/logram.db` | Override the SQLite database path. Useful for pointing multiple projects at a shared store, or for CI environments with a fixed artifact path. |
-| `LOGRAM_PROJECT_ROOT` | auto-detected | Override the project root for blob asset storage. Logram auto-detects from `pyproject.toml` / `.git` markers; set this explicitly in Docker or monorepo environments where detection fails. |
-| `LOGRAM_INPUT_ID` | `""` | Override the `input_id` for the current run. Used by `logram test` to scope each golden replay to its original input document. |
-
----
-
-## 🛠️ Guarantees & Best Practices
-
-Logram is a **Data-Flow Tracker**, not a system-level debugger. The Oracle is sharp, but it traces the code you write — not the code Python writes for you at runtime. These six rules make the difference between *good* replays and *perfect* ones.
-
-### 1. The Data-Flow Philosophy
-
-Logram is designed to trace the movement of information — text, images, structured data. It is **not** meant to trace system-level resources.
-
-- **❌ Avoid:** Returning open files, network sockets, database connections, or Python generators (that don't yield data) from a traced step.
-- **⚠️ The Fallback:** If a step returns a non-serializable object, Logram stores its string representation (`str(obj)`). On replay, the next step receives a **string**, not the original object.
-- **✅ Best Practice:** Ensure your steps return data-rich objects — dicts, Pydantic models, dataclasses.
-
-#### Streaming outputs (generators, `async for`)
-
-Logram natively supports **generator functions** (`yield`) and **async generator functions** (`async def` + `yield`).
-
-- **Shadow Accumulation:** During a live run, Logram acts as a transparent proxy, capturing every yielded chunk in the background without adding latency.
-- **Integrity Guarantee:** The cache is only saved if the stream is **fully consumed**. If the generator is closed prematurely (e.g., a `break` in your loop), no cache entry is created to avoid replaying partial data.
-- **Automatic Replay:** On a cache hit, Logram re-yields the stored chunks, allowing your downstream logic to remain identical whether the data is live or cached.
-
-```python
-# ✅ Traceable — Logram automatically captures and replays this stream
-@logram.trace
-async def stream_llm(prompt: str):
-    async for chunk in client.chat(prompt, stream=True):
-        yield chunk
-
-# Usage remains unchanged
-async for part in stream_llm("Hello"):
-    print(part)
-```
-
----
-
-### 2. Typed Outputs = Perfect Rehydration
-
-Logram's serialization is tag-based, not annotation-based. When a traced step returns a Pydantic model or a dataclass, Logram automatically embeds class metadata (module path, class name, kind) into the stored payload at capture time.
-
-On cache hit, it dynamically imports the class and reconstructs the exact instance — `model_validate` for Pydantic, `cls(**state)` for dataclasses. No type annotations on the traced function are required. The guarantee comes from the return type itself:
-
-```python
-@logram.trace
-def extract_quantities(page: Page) -> ExtractionResult:  # annotation optional
-    ...
-    return ExtractionResult(tiles=tiles, totals=totals)
-    # ↑ stored as {__af_kind__: "pydantic", __af_model__: "ExtractionResult", ...}
-    # On replay: exact ExtractionResult instance reconstructed, IDE autocompletion intact.
-```
-
-- **✅ Best Practice:** Return Pydantic models or dataclasses from traced steps. Plain dicts work but lose type reconstruction on replay.
-
----
-
-### 3. Stable Object Identity (`__logram_trace_key__`)
-
-The Oracle hashes **code**. Argument values follow a separate path. For primitive arguments (`str`, `int`, `dict`, `list`), Logram's serializer produces stable, content-based keys automatically. For your custom classes, it falls back to `repr()` — which often returns `<MyObject at 0x7f3a2c>`. The address changes every run, the cache key drifts, replay is defeated.
-
-**The Fix:** Implement `__logram_trace_key__` to return a stable unique identifier:
-
-```python
-class ImageTile:
-    def __init__(self, tile_id, pixels):
-        self.tile_id = tile_id
-        self.pixels = pixels
-
-    def __logram_trace_key__(self):
-        # Cache identity = tile_id, not the address of `pixels`
-        return {"tile_id": self.tile_id}
-```
-
-Logram's PROBE 2 logger detects address-based reprs at runtime and warns explicitly: `[PROBE 2][UNSTABLE_REPR] type=ImageTile … Fix: implement __logram_trace_key__ on this class.`
-
----
-
-### 4. Smart Configuration Tracking
-
-The Oracle captures the **runtime value** of every constant your function reads — `str`, `int`, `float`, `bool`, `dict`, `list` — regardless of naming convention.
-
-```python
-temperature = 0.7              # ✅ tracked
-SYSTEM_PROMPT = "You are…"     # ✅ tracked
-modelName = "gpt-4o"           # ✅ tracked
-PROMPT_VARIANTS = ["a", "b"]   # ✅ tracked (deep — values, not just identity)
-```
-
-Edit `temperature = 0.7 → 0.9`. Mutate `PROMPT_VARIANTS.append("c")` between two `init()` calls. Both invalidate the cache correctly.
-
-- **The Catch:** Snapshotting happens when a function is first called in a run. If you mutate a global dictionary *inside* a traced function during a single run, Logram does not detect that mid-run change for subsequent steps in the same run — only across runs.
-- **✅ Best Practice:** Treat configuration as immutable per run. Pass dynamic values as explicit function arguments, or use a `@stateful` class to manage shared mutable state safely.
-
----
-
-### 5. Distributed Execution (Multiprocessing, Ray, Celery)
-
-ContextVar values — including the `run_id` that identifies your pipeline run — do not propagate across process boundaries. Without intervention, every worker process starts with `run_id = None` and all traced steps are written under a shared "default_run", mixing traces from all workers.
-
-Use `logram.worker_init` as the pool initializer to propagate the run context:
-
-```python
-run_id = logram.init(project="my_pipeline", input_id="doc_42")
-
-with ProcessPoolExecutor(
-    initializer=logram.worker_init,
-    initargs=(run_id,),
-) as pool:
-    results = list(pool.map(process_tile, tiles))
-```
-
-`worker_init` sets the ContextVar in each worker process. It does not call `logram.init()` — the run is already registered in the parent, and the SQLite database is shared on disk (WAL mode handles concurrent writes).
-
-> **Linux note:** On Linux, Python defaults to the `fork` start method. Since workers inherit the parent's open SQLite connection, prefer `spawn` or `forkserver` to avoid connection corruption:
-> ```python
-> import multiprocessing
-> multiprocessing.set_start_method("spawn")
-> ```
-
----
-
-### 6. Oracle Sensitivity — What Triggers a Re-Run
-
-Logram's Oracle is **paranoid by design**: it errs on the side of re-execution rather than stale cache. Knowing exactly what it sees and what it doesn't makes you a better Logram engineer.
-
-#### What is invariant (no false invalidation)
-
-- **Comments, whitespace, blank lines, docstrings.** Hashed structurally — formatting is invisible.
-- **`black` / `ruff` reformat.** No effect on the cache. Run formatters whenever you like.
-- **Python minor-version upgrades** (3.10 → 3.13). The structural hash is cross-version stable. A minor cache delta may appear from `ast.unparse` formatting drift on complex constructs (f-strings, `match`, walrus); to force a clean rebuild after an upgrade, run `clear_logic_snapshot_cache()` or simply delete `.logram/`.
-- **Renaming a parameter, adding a type annotation, reordering keyword arguments at the call site.** Either invariant, or invalidate only when the change is real.
-
-#### What invalidates correctly
-
-- **Editing a function body.** Captured by the structural AST hash.
-- **Changing a constant value** (`temperature`, `SYSTEM_PROMPT`, dict entries). Captured by JIT global resolution at runtime.
-- **Modifying a callee at any depth** in the user-space call graph. Captured by the recursive Merkle aggregation.
-- **Changing a method body when the caller uses `self.method()`.** Captured by MRO traversal — Logram resolves through `cls.__mro__` exactly as Python does.
-- **Adding `eval`, `exec`, or dynamic `getattr`.** Captured as a deterministic volatility marker (`<volatile:eval>` etc.) — the marker itself enters the hash, so adding/removing it invalidates correctly while keeping the cache stable when the dynamic site is unchanged.
-
-#### Known blind spots — and how to compensate
-
-<details>
-<summary><strong>Inline imports</strong> — modules imported inside a function body are local bindings</summary>
-
-```python
-def fn(x):
-    import math               # ← `math` is local to fn
-    return math.pi * x        # ← Oracle sees `math.pi` as __local__:math.pi (filtered)
-```
-
-The Oracle treats `import math` as creating a local variable (which Python correctly does). Constants from inline-imported modules are *not* captured as resolved globals. The function's own source still triggers invalidation when edited; only mid-run mutations to the imported module's constants are invisible.
-
-**Fix:** Move imports to the top of the file. This is also what `ruff E402` recommends.
-
-</details>
-
-<details>
-<summary><strong>Truly dynamic dispatch</strong> — <code>getattr(self, var_name)</code>, <code>globals()[key]</code></summary>
-
-Literal-aware: `getattr(self, "method_name")` is resolved as an attribute access (SAFE). But `getattr(self, dyn_var)` cannot be statically resolved — the actual callee depends on runtime data. Logram emits `<volatile:getattr_dyn>` so the cache correctly tracks the *site* of dynamic dispatch, but the resolved callee is invisible to the Merkle tree.
-
-**Fix:** Use `vcr_key_fn` to make the dynamic element explicit in the cache key:
-
-```python
-@logram.trace(
-    vcr_key_fn=lambda fn, args, kwargs: (args, kwargs, type(args[0]).__name__)
-)
-async def dispatch_step(self, payload):
-    method = getattr(self, f"_handle_{payload.type}")
-    return await method(payload)
-```
-
-</details>
-
-<details>
-<summary><strong>Absurdly deep call graphs</strong> — beyond 256 user-space callees</summary>
-
-The Oracle bounds its callee Merkle tree at 256 unique user-space functions per traced step (a soft cap to keep hash time predictable in pathological graphs). Real pipelines reach 30–80; if you hit 256 you'll see a `[Logram][oracle] callee budget exhausted` warning in the logs telling you exactly where it stopped.
-
-**Fix:** If your graph is genuinely larger than 256 unique helpers, raise the budget at startup:
-```python
-import logram.oracle
-logram.oracle._CALLEE_BUDGET = 1024
-```
+| `LOGRAM_REPLAY` | `""` | `"true"` enables replay: every step with a cached success replays |
+| `LOGRAM_FORCE_STEP` | `""` | Comma-separated steps to force live; invalidates their cache |
+| `LOGRAM_FORCE_FROM` | `""` | Step from which execution cascades live |
+| `LOGRAM_DB_PATH` | `.logram/logram.db` | Database location (shared store, CI artifact path) |
+| `LOGRAM_PROJECT_ROOT` | auto-detected | Root for blob storage, detected from `pyproject.toml` / `.git`; set it in Docker or monorepos |
+| `LOGRAM_INPUT_ID` | `""` | Override the run's `input_id` (used by `logram test`) |
 
 </details>
 
 ---
 
-## Web Dashboard (Waitlist)
+## Design rationale
 
-A web dashboard for browsing runs, visualizing step trees, and diffing logic across pipeline versions is in development.
+Observability tools are built for production: they surface anomalies in deployed systems. That is essential for maintenance but does not help build a better system. Logram targets the development loop, where the bottleneck, both for improving performance and fixing logic, is the cost of verifying each change: the latency and API calls needed to re-execute successful upstream steps just to reach the logic being tuned.
 
-**[Join the waitlist → logram.dev/waitlist](https://logram.dev/waitlist)**
+Reducing that cost to seconds changes how pipelines get built:
+
+- **Prototyping.** Several prompt variants or logic structures can be tested against the same historical context in minutes.
+- **Controlled comparisons.** Sub-components are tuned on real historical inputs, with everything upstream held fixed.
+- **Regression-free upgrades.** An improvement for one edge case is checked against all reference runs before it lands.
 
 ---
+
+## Status
+
+| Capability | Status |
+|---|---|
+| AST-based, cross-Python-version stable fingerprinting | Available |
+| MRO-aware method resolution | Available |
+| SQLite WAL mode (concurrent access) | Available |
+| Content-addressed blob deduplication | Available |
+| MCP server for agents | Available |
+| Git-based run versioning | Available |
+| Golden-run regression suite | In progress |
+| Web dashboard | In progress ([waitlist](https://logram.dev/waitlist)) |
+| Cloud sync of reference runs | Roadmap |
+
+If Logram is useful to you, a star on the repository helps.
 
 ## License
 
