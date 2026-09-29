@@ -12,9 +12,8 @@ import logram.cli as cli
 
 
 @pytest.fixture
-def cli_paths(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    monkeypatch.setattr(cli, "DB_PATH", workspace / ".logram" / "logram.db")
-    monkeypatch.setattr(cli, "ASSETS_DIR", workspace / ".logram_assets")
+def cli_paths(workspace: Path) -> Path:
+    # The CLI resolves the store from LOGRAM_PROJECT_ROOT, set by ``workspace``.
     return workspace
 
 
