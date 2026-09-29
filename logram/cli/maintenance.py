@@ -24,7 +24,7 @@ from ..theme import (
     console,
     hint_line,
 )
-from ._app import app
+from ._app import app, install_hint
 from ._common import (
     _claude_desktop_config_path,
     _connect_db,
@@ -58,7 +58,7 @@ def ui(
                 Text.assemble(
                     ("uvicorn not available: ", "lg.muted"),
                     (str(exc), "lg.error"),
-                    ("\n\npip install \"logram-sdk[server]\"", "lg.brand"),
+                    ("\n\n" + install_hint("server"), "lg.brand"),
                 ),
                 box=PANEL_BOX,
                 border_style="lg.error",

@@ -4,6 +4,18 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/) (pre-1.0: minor versions may change behaviour).
 
+## [Unreleased]
+
+### Added
+
+- `logram --version`.
+
+### Fixed
+
+- Install instructions: Logram is not published on PyPI (a different project
+  named `logram` is), so extras are installed from the repository. The README
+  now starts with a runnable example.
+
 ## [0.4.0] - 2026-09-29
 
 Correctness release: replay no longer serves stale results, and several ways
@@ -55,8 +67,8 @@ but fingerprints changed, so every step runs live once after upgrading.
 
 ### Changed
 
-- The MCP server and the dashboard API are optional extras:
-  `pip install "logram-sdk[mcp]"`, `"logram-sdk[server]"` or `"logram-sdk[all]"`.
+- The MCP server and the dashboard API are optional extras (`mcp`, `server`,
+  `all`), e.g. `pip install "logram-sdk[mcp] @ git+https://github.com/Mnemonic-Systems/logram.git"`.
 - `logram test` exits with 1 on any regression.
 - `logram diff last` and `--ss` show the baseline on the left (old → new).
 - The CLI finds the store from the project root, like the SDK, so it works
@@ -82,5 +94,6 @@ fingerprints and local SQLite replay, the `logram` CLI (`inspect`, `diff`,
 coding agents, the read-only dashboard API, and agent rule files written by
 `logram init`.
 
+[Unreleased]: https://github.com/Mnemonic-Systems/logram/compare/v0.4.0...HEAD
 [0.4.0]: https://github.com/Mnemonic-Systems/logram/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Mnemonic-Systems/logram/releases/tag/v0.3.0

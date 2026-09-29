@@ -18,10 +18,26 @@ Validating a change to a multi-step LLM pipeline usually means re-running everyt
 
 It is a development tool, not a production one: not an observability platform, an evaluation framework or an orchestrator ([positioning](docs/design.md)).
 
-## Quickstart
+## Try it in 30 seconds
+
+No API key needed: the example pipeline uses a fake model that sleeps like a real one.
 
 ```bash
-pip install git+https://github.com/Mnemonic-Systems/logram.git
+git clone https://github.com/Mnemonic-Systems/logram.git && cd logram
+pip install .
+python examples/invoice_pipeline.py                      # live run, ~4 s
+LOGRAM_REPLAY=true python examples/invoice_pipeline.py   # everything replayed, ~20 ms
+logram inspect last
+```
+
+Then edit `SUMMARY_PROMPT` in the example and replay again: only the summary step runs live ([walkthrough](examples/)).
+
+## Use it in your project
+
+Logram is installed from this repository (it is not published on PyPI; a different project named `logram` is):
+
+```bash
+pip install "git+https://github.com/Mnemonic-Systems/logram.git"
 ```
 
 ```python
@@ -52,7 +68,7 @@ logram inspect last                       # step tree: what replayed, what ran
 logram diff last --globals                # what changed, down to the prompt
 ```
 
-[`examples/invoice_pipeline.py`](examples/) runs end to end without an API key. Sync and async functions, generators, stateful classes (`@logram.stateful`) and multiprocessing are supported; token usage is read from OpenAI, Anthropic and Gemini responses.
+Sync and async functions, generators, stateful classes (`@logram.stateful`) and multiprocessing are supported; token usage is read from OpenAI, Anthropic and Gemini responses.
 
 ## How it works
 
@@ -89,7 +105,7 @@ The fingerprint covers the code under your project directory and the values it r
 
 ## Agent interface
 
-A local MCP server lets coding agents (Claude Code, Cursor) read what actually ran, locate what changed between two runs, validate a fix by replay and check it against reference runs. `pip install "logram-sdk[mcp]"`, then `logram init && logram mcp install`. See [agent interface](docs/mcp.md).
+A local MCP server lets coding agents (Claude Code, Cursor) read what actually ran, locate what changed between two runs, validate a fix by replay and check it against reference runs. Install it with `pip install "logram-sdk[mcp] @ git+https://github.com/Mnemonic-Systems/logram.git"`, then run `logram init && logram mcp install`. See [agent interface](docs/mcp.md).
 
 ## Documentation
 

@@ -1,6 +1,6 @@
 # Logram dashboard API
 
-Read-only FastAPI server behind the web dashboard. Install it with `pip install "logram-sdk[server]"`.
+Read-only FastAPI server behind the web dashboard. Install it with `pip install "logram-sdk[server] @ git+https://github.com/Mnemonic-Systems/logram.git"`.
 
 - Serves the trace store (`.logram/logram.db`) **read-only**.
 - Serves blobs from `.logram_assets/`, by content hash only.

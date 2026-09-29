@@ -12,7 +12,7 @@ Coding agents such as Claude and Cursor work from static source files. When a pi
 ## Setup
 
 ```bash
-pip install "logram-sdk[mcp]"
+pip install "logram-sdk[mcp] @ git+https://github.com/Mnemonic-Systems/logram.git"
 logram init          # writes the agent rule files below into your project
 logram mcp install   # registers the MCP server with Claude Code, Cursor or Claude Desktop
 logram mcp config    # or print the config block to add manually
