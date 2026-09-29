@@ -1,7 +1,7 @@
 # LOGRAM_AGENT_RULES.md
 
 > **AUDIENCE:** Autonomous coding agents (Cursor, Claude Code, Copilot CLI, Codex, custom LLM agents).
-> **PURPOSE:** Authoritative ruleset for installing, instrumenting, and writing Python code in a project that uses the **Logram SDK** (`logram-sdk >= 0.3.0`).
+> **PURPOSE:** Authoritative ruleset for installing, instrumenting, and writing Python code in a project that uses the **Logram SDK** (`logram-sdk >= 0.4.0`).
 > **CONTRACT:** These rules are imperative. Treat MUST / MUST NOT / SHALL as RFC 2119 keywords. If a user instruction conflicts with a rule below, surface the conflict and ASK before proceeding.
 
 ---
@@ -125,9 +125,9 @@ If the change is non-local, **stop and propose it as a discrete suggestion**. Do
 ```bash
 pip install https://github.com/Mnemonic-Systems/logram.git
 # or, in pyproject.toml:
-#   dependencies = ["logram-sdk>=0.3.0"]
+#   dependencies = ["logram-sdk>=0.4.0"]
 # or, in requirements.txt:
-#   logram-sdk>=0.3.0
+#   logram-sdk>=0.4.0
 ```
 
 The package exposes two console scripts: `logram` and `lg`. Both point to `logram.cli:app`.
@@ -1188,4 +1188,4 @@ if __name__ == "__main__":
 
 ---
 
-*End of LOGRAM_AGENT_RULES.md — version 1.0, targeting `logram-sdk >= 0.3.0`.*
+*End of LOGRAM_AGENT_RULES.md — version 1.0, targeting `logram-sdk >= 0.4.0`.*

@@ -156,7 +156,13 @@ def test_inspect_total_counts_nested_steps_once(cli_paths: Path) -> None:
     result = CliRunner().invoke(cli.app, ["inspect", "last"])
     assert result.exit_code == 0, result.output
     total = float(re.search(r"Total: ([0-9.]+)s", result.output).group(1))
-    assert 0.09 <= total < 0.18, result.output
+    outer = float(re.search(r"outer\s+([0-9.]+)s", result.output).group(1))
+    inner = float(re.search(r"inner\s+([0-9.]+)s", result.output).group(1))
+    # Compare with the recorded durations rather than wall-clock bounds: CI
+    # runners can oversleep a lot. Counting the nested step twice would give
+    # outer + inner (about twice the total).
+    assert inner > 0.09
+    assert abs(total - outer) <= 0.011, result.output
 
 
 PROMPT_PIPELINE = """
