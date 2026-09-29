@@ -129,6 +129,7 @@ def worker_init(
       inheriting open SQLite connections from the parent.
     """
     import atexit
+
     from .decorators import storage as _storage
 
     current_run_id.set(run_id)

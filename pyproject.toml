@@ -22,6 +22,12 @@ dependencies = [
     "fastmcp>=2.0.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
 [project.scripts]
 logram = "logram.cli:app"
 lg = "logram.cli:app"
@@ -31,3 +37,14 @@ Homepage = "https://github.com/Idriss20032003/Logram-sdk"
 
 [tool.flit.module]
 name = "logram"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
