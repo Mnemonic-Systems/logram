@@ -9,19 +9,20 @@ import inspect
 import json
 import linecache
 import logging
+import os
 import time
 import traceback
 import types
 import uuid
-import os
 import weakref
-from dataclasses import asdict, is_dataclass
+from dataclasses import fields as dataclass_fields
+from dataclasses import is_dataclass
 from typing import Any, Callable, Union, get_args, get_origin, get_type_hints
 
 from .context import _is_forced_by_flow, current_input_id, current_run_id, current_step_id
-from .oracle import clear_oracle_cache, compute_logic_fingerprint
+from .oracle import clear_oracle_cache, compute_logic_fingerprint, snapshot_digest
 from .serializer import BlobManager, ensure_serializable, rehydrate_logram_output
-from .storage import TraceStorage, _VCR_MISS
+from .storage import _VCR_MISS, TraceStorage
 
 log = logging.getLogger(__name__)
 
@@ -35,6 +36,7 @@ _MAX_LIST_ITEMS = 16
 _MAX_DICT_ITEMS = 24
 _MAX_STR_LEN = 220
 _MAX_MODULE_SCAN_DEPTH = 3
+_MAX_KEY_DEPTH = 64
 _STATEFUL_CONFIG_ATTR = "__af_state_config__"
 
 
@@ -147,9 +149,18 @@ def _safe_call_hook(obj: Any, attr: str) -> Any:
         return None
 
 
-def _compact_value(value: Any, depth: int = 0) -> Any:
-    if depth > 4:
+def _compact_value(value: Any, depth: int = 0, _seen: set[int] | None = None) -> Any:
+    """Content-based identity of ``value`` for the cache key.
+
+    Every element of every container is included: two arguments that differ
+    anywhere must produce different keys. Only long strings and binary
+    payloads are replaced by a content hash, which keeps the key small
+    without losing information.
+    """
+    if depth > _MAX_KEY_DEPTH:
         return "<max_depth>"
+    if _seen is None:
+        _seen = set()
 
     if value is None or isinstance(value, (bool, int, float)):
         return value
@@ -166,81 +177,69 @@ def _compact_value(value: Any, depth: int = 0) -> Any:
     if _has_obj_hook(value, "__logram_trace_key__"):
         out = _safe_call_hook(value, "__logram_trace_key__")
         if out is not None:
-            return _compact_value(out, depth + 1)
-
-    if _has_obj_hook(value, "__logram_trace_log__"):
-        out = _safe_call_hook(value, "__logram_trace_log__")
-        if out is not None:
-            return _compact_value(out, depth + 1)
-
-    if is_dataclass(value) and not isinstance(value, type):
-        try:
-            value = asdict(value)
-        except Exception:
-            return {"__af_obj__": type(value).__name__, "repr": repr(value)[:_MAX_STR_LEN]}
-
-    if isinstance(value, (list, tuple)):
-        return [_compact_value(x, depth + 1) for x in value[:_MAX_LIST_ITEMS]]
+            return _compact_value(out, depth + 1, _seen)
 
     if isinstance(value, dict) and value.get("__af_blob__") is True:
         blob_hash = str(value.get("hash", ""))
         blob_size = value.get("size", 0)
         return {"__af_bytes__": True, "len": blob_size, "sha12": blob_hash[:12]}
 
-    if isinstance(value, dict):
-        out: dict[str, Any] = {}
-        for i, (k, v) in enumerate(value.items()):
-            if i >= _MAX_DICT_ITEMS:
-                break
-            out[str(k)] = _compact_value(v, depth + 1)
-        return out
+    if isinstance(value, (list, tuple, set, frozenset, dict)):
+        if id(value) in _seen:
+            return "<cycle>"
+        _seen.add(id(value))
+        try:
+            if isinstance(value, dict):
+                return {str(k): _compact_value(v, depth + 1, _seen) for k, v in value.items()}
+            items = [_compact_value(x, depth + 1, _seen) for x in value]
+            if isinstance(value, (set, frozenset)):
+                items.sort(key=repr)
+            return items
+        finally:
+            _seen.discard(id(value))
 
-    d = getattr(value, "__dict__", None)
-    if isinstance(d, dict):
-        summary: dict[str, Any] = {"__af_obj__": type(value).__name__}
-        for field in (
-            "tile_id",
-            "grid_tag",
-            "page_number",
-            "offset_x",
-            "offset_y",
-            "width",
-            "height",
-            "page_width",
-            "page_height",
-            "bbox",
-            "centroid",
-            "id",
-            "name",
-        ):
-            if field in d:
-                summary[field] = _compact_value(d[field], depth + 1)
+    if is_dataclass(value) and not isinstance(value, type):
+        try:
+            state = {f.name: getattr(value, f.name) for f in dataclass_fields(value)}
+        except Exception:
+            state = None
+        if state is not None:
+            return {"__af_obj__": type(value).__name__, "state": _compact_value(state, depth + 1, _seen)}
 
-        img_bytes = d.get("image_bytes")
-        if isinstance(img_bytes, (bytes, bytearray, memoryview)):
-            raw = bytes(img_bytes)
-            summary["image"] = {"len": len(raw), "sha12": _sha12_bytes(raw)}
-
-        if len(summary) > 1:
-            return summary
+    if callable(getattr(value, "model_dump", None)) and not isinstance(value, type):
+        state = _safe_call_hook(value, "model_dump")
+        if isinstance(state, dict):
+            return {"__af_obj__": type(value).__name__, "state": _compact_value(state, depth + 1, _seen)}
 
     # ── PROBE 2 ── Detect address-based repr → guaranteed VCR cache miss ────────
     try:
         r = repr(value)
-        if " at 0x" in r or "object at 0x" in r:
-            log.warning(
-                "[Logram][PROBE 2][UNSTABLE_REPR] type=%s id=%d repr_preview=%s "
-                "— repr() contains a memory address. This arg produces a different "
-                "vcr_args string on every run → VCR cache miss GUARANTEED. "
-                "Fix: implement __logram_trace_key__ on this class.",
-                type(value).__name__,
-                id(value),
-                r[:160],
-            )
     except Exception:
-        pass
+        r = f"<unrepresentable {type(value).__name__}>"
+    if " at 0x" in r:
+        log.warning(
+            "[Logram][PROBE 2][UNSTABLE_REPR] type=%s id=%d repr_preview=%s "
+            "— repr() contains a memory address. This arg produces a different "
+            "vcr_args string on every run → VCR cache miss GUARANTEED. "
+            "Fix: implement __logram_trace_key__ on this class.",
+            type(value).__name__,
+            id(value),
+            r[:160],
+        )
     # ── END PROBE 2 ─────────────────────────────────────────────────────────────
-    return {"__af_obj__": type(value).__name__, "repr": repr(value)[:_MAX_STR_LEN]}
+    if len(r) > _MAX_STR_LEN:
+        return {"__af_obj__": type(value).__name__, "repr_sha12": _sha12_bytes(r.encode("utf-8", errors="replace"))}
+    return {"__af_obj__": type(value).__name__, "repr": r}
+
+
+def _log_view(value: Any) -> Any:
+    """What gets stored and displayed for an argument (does not affect the cache key)."""
+    for hook in ("__logram_trace_log__", "__logram_trace_key__"):
+        if _has_obj_hook(value, hook):
+            out = _safe_call_hook(value, hook)
+            if out is not None:
+                return out
+    return value
 
 
 def _coerce_int_str_dict_keys(value: Any) -> Any:
@@ -397,14 +396,6 @@ def _bind_named_arguments(func: Any, args: tuple[Any, ...], kwargs: dict[str, An
     return named
 
 
-def _stable_snapshot_hash(snapshot: dict[str, Any]) -> str:
-    try:
-        payload = json.dumps(snapshot, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    except Exception:
-        payload = str(snapshot).encode("utf-8", errors="replace")
-    return hashlib.sha256(payload).hexdigest()
-
-
 def _get_logic_snapshot(func: Any) -> tuple[dict[str, Any], dict[str, Any]]:
     """Compute the logic snapshot + callee registry for ``func``.
 
@@ -430,7 +421,7 @@ def _implementation_artifacts(func: Any) -> tuple[dict[str, Any], str, dict[str,
         return cached
 
     logic_snapshot, callee_registry = _get_logic_snapshot(unwrapped)
-    fingerprint = _stable_snapshot_hash(logic_snapshot)
+    fingerprint = snapshot_digest(logic_snapshot)
 
     try:
         current_globals = logic_snapshot.get("resolved_globals")
@@ -531,12 +522,6 @@ def clear_logic_snapshot_cache() -> None:
     clear_oracle_cache()
 
 
-def _default_vcr_args_kwargs(func: Any, args: tuple[Any, ...], kwargs: dict[str, Any]) -> tuple[Any, Any]:
-    named = _bind_named_arguments(func, args, kwargs, drop_self_cls=True)
-    compact_named = {k: _compact_value(v) for k, v in named.items()}
-    return compact_named, {}
-
-
 def _logical_args_for_vcr(
     func: Any,
     args: tuple[Any, ...],
@@ -555,7 +540,7 @@ def _default_log_inputs(func: Any, args: tuple[Any, ...], kwargs: dict[str, Any]
     named = _bind_named_arguments(func, args, kwargs, drop_self_cls=True)
     # Keep full inputs for trace serialization so binary payloads (bytes/image bytes)
     # can be intercepted by BlobManager and persisted into .logram_assets.
-    return named
+    return {k: _log_view(v) for k, v in named.items()}
 
 
 def _prepare_step_ctx(
@@ -568,16 +553,11 @@ def _prepare_step_ctx(
     compact_inputs=True,
     ignore_in_hash: list[str] | None = None,
 ):
-    if compact_inputs:
-        named_for_probe = _bind_named_arguments(func, args, kwargs, drop_self_cls=True)
-        vcr_args, vcr_kwargs = _logical_args_for_vcr(func, args, kwargs, ignore_in_hash=ignore_in_hash)
-        log_inputs = _default_log_inputs(func, args, kwargs)
-    else:
-        named = _bind_named_arguments(func, args, kwargs, drop_self_cls=True)
-        named_for_probe = named
-        vcr_args = named
-        vcr_kwargs = {}
-        log_inputs = named
+    # ``compact_inputs`` is accepted for backward compatibility only: inputs are
+    # always logged in full, and the cache key is content-complete either way.
+    named_for_probe = _bind_named_arguments(func, args, kwargs, drop_self_cls=True)
+    vcr_args, vcr_kwargs = _logical_args_for_vcr(func, args, kwargs, ignore_in_hash=ignore_in_hash)
+    log_inputs = _default_log_inputs(func, args, kwargs)
 
     if vcr_key_fn is not None:
         try:
@@ -803,7 +783,7 @@ def _compute_state_delta(
 
 
 def trace(
-    name: str = None,
+    name: str | Callable[..., Any] | None = None,
     *,
     ignore_in_hash: list[str] | None = None,
     track_args: list[str] | None = None,
@@ -815,10 +795,8 @@ def trace(
     exclude_state: list[str] | None = None,
 ):
     def decorator(func):
-        # Generators (sync or async) produce a stream object, not a concrete
-        # serializable value. Tracing them would silently store str(generator)
-        # and permanently disable caching. Warn once at decoration time and
-        # return the original function untouched — zero overhead, zero surprise.
+        # Generators (sync or async) are buffered: chunks are yielded live and
+        # cached as a list once the stream is fully consumed.
         if inspect.isasyncgenfunction(func):
             @functools.wraps(func)
             async def asyncgen_wrapper(*args, **kwargs):
@@ -878,6 +856,10 @@ def trace(
 
         return async_wrapper if is_async else sync_wrapper
 
+    # Bare ``@trace`` form: the decorated function arrives as ``name``.
+    if callable(name):
+        func, name = name, None
+        return decorator(func)
     return decorator
 
 
