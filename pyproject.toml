@@ -43,6 +43,7 @@ server = [
 ]
 all = ["logram-sdk[mcp,server]"]
 dev = [
+    "logram-sdk[all]",
     "pytest>=8.0",
     "ruff>=0.6",
 ]

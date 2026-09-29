@@ -35,6 +35,7 @@ from .storage import resolve_db_path
 # ---------------------------------------------------------------------------
 
 REPLAY_SESSION_LIMIT = 5
+SCRIPT_TIMEOUT_SEC = 900
 
 _replay_counter: int = 0
 _replay_lock = threading.Lock()
@@ -140,56 +141,38 @@ def _is_path_safe(script_path: str) -> tuple[bool, str]:
     return True, ""
 
 
-def _logic_unchanged_since_failure(force_step: str) -> bool:
-    """Return True when the most recent logic_hash for force_step equals the last FAILED hash.
+def _last_run_of_step_failed(step_name: str) -> bool:
+    """True when the most recent record of ``step_name`` is a failure.
 
-    This detects retry loops where the agent calls run_surgical_replay repeatedly
-    without modifying the code or prompts. When the function returns True, the
-    tool aborts and instructs the agent to make a code change first.
-
-    Algorithm:
-    - Fetch the logic_hash of the most recent FAILED step record for force_step.
-    - Fetch the logic_hash of the most recent step record (any status) for force_step.
-    - If both hashes exist and are equal → code has not changed since the failure.
-
-    Limitation: this is a heuristic. It cannot read the current file state before
-    running; it compares what Logram last recorded.
+    A failed step has no cache entry: it already runs live on replay, so
+    forcing it is pointless and usually means the agent is retrying without
+    having changed anything.
     """
     try:
         conn = _connect()
     except FileNotFoundError:
         return False
-
     try:
-        last_failed_row = conn.execute(
-            """
-            SELECT logic_hash FROM steps
-            WHERE name = ? AND status IN ('FAILED', 'FAILURE', 'ERROR')
-            ORDER BY timestamp DESC LIMIT 1
-            """,
-            (force_step,),
+        row = conn.execute(
+            "SELECT status FROM steps WHERE name = ? ORDER BY timestamp DESC LIMIT 1",
+            (step_name,),
         ).fetchone()
-
-        if not last_failed_row or not last_failed_row["logic_hash"]:
-            return False
-
-        most_recent_row = conn.execute(
-            """
-            SELECT logic_hash FROM steps
-            WHERE name = ?
-            ORDER BY timestamp DESC LIMIT 1
-            """,
-            (force_step,),
-        ).fetchone()
-
-        if not most_recent_row or not most_recent_row["logic_hash"]:
-            return False
-
-        return last_failed_row["logic_hash"] == most_recent_row["logic_hash"]
+        return bool(row) and str(row["status"]).upper() in ("FAILED", "FAILURE", "ERROR")
     except Exception:
         return False
     finally:
         conn.close()
+
+
+def _run_script(args: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str] | str:
+    """Run a pipeline script; return an error report instead of hanging forever."""
+    try:
+        return subprocess.run(args, env=env, capture_output=True, text=True, timeout=SCRIPT_TIMEOUT_SEC)
+    except subprocess.TimeoutExpired:
+        return (
+            f"## Execution timed out\n\nThe script did not finish within {SCRIPT_TIMEOUT_SEC} s and was stopped. "
+            "Check for a hang (waiting on input, a network call without timeout) before retrying."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -715,8 +698,9 @@ def run_surgical_replay(
     - PATH JAIL: script_path must be a .py file inside the current working directory.
     - CIRCUIT BREAKER: max {REPLAY_SESSION_LIMIT} replays per session; after that a human
       must manually validate before the agent can continue.
-    - LOGIC GUARD: if force_step code/prompts are unchanged since the last failure,
-      execution is aborted to prevent wasting API tokens on guaranteed-to-fail replays.
+    - LOGIC GUARD: force_step is refused when that step's last run failed: it has
+      no cache entry and already runs live, so forcing it only repeats the failure.
+    - TIMEOUT: the script is stopped after SCRIPT_TIMEOUT_SEC seconds.
 
     Args:
         script_path: Relative path to the Python pipeline entry-point (.py files only,
@@ -731,7 +715,7 @@ def run_surgical_replay(
 
     Returns:
         Markdown report with: status, exit code, replays remaining in session budget,
-        estimated API cost, and stderr/stdout snippets on failure.
+        and stderr/stdout snippets on failure.
     """
     global _replay_counter
 
@@ -747,7 +731,28 @@ def run_surgical_replay(
             "Provide the path to the pipeline entry-point Python file."
         )
 
-    # ── Gate 2: Circuit Breaker ───────────────────────────────────────────────
+    # ── Gate 2: Logic Guard (before the breaker: a refused call costs no budget) ──
+    if force_step and _last_run_of_step_failed(force_step):
+        return (
+            f"## Execution Aborted — `{force_step}` Last Failed\n\n"
+            f"The most recent run of step `{force_step}` failed, so there is nothing "
+            "cached to invalidate: forcing it would only repeat the same run.\n\n"
+            "> **IMPORTANT — VCR cache mechanics:** Logram only caches steps that "
+            "completed with status SUCCESS or REPLAYED. A FAILED step has **no cache "
+            "entry**. In replay mode it always runs live automatically — you do NOT "
+            "need `force_step` to rerun it after a fix.\n\n"
+            f"> **Correct call after editing `{force_step}`:**\n"
+            "> ```\n"
+            "> run_surgical_replay(\"<script_path>\")  # no force_step argument\n"
+            "> ```\n"
+            f"> `{force_step}` will run live because its only DB record has status "
+            "FAILED (no cache hit).\n\n"
+            "> If you intended to re-run a **previously successful** step, modify its "
+            "source or global variables first so the logic_hash changes, then retry.\n\n"
+            "- Replay budget unchanged."
+        )
+
+    # ── Gate 3: Circuit Breaker ───────────────────────────────────────────────
     with _replay_lock:
         if _replay_counter >= REPLAY_SESSION_LIMIT:
             return (
@@ -764,30 +769,6 @@ def run_surgical_replay(
 
     remaining = REPLAY_SESSION_LIMIT - current_count
     budget_line = f"- Replays remaining: {remaining}/{REPLAY_SESSION_LIMIT}"
-    cost_line = "- Estimated cost: ~$0.05"
-
-    # ── Gate 3: Logic Guard ───────────────────────────────────────────────────
-    if force_step and _logic_unchanged_since_failure(force_step):
-        return (
-            f"## Execution Aborted — Logic Unchanged Since Last Failure\n\n"
-            f"The logic_hash (code + prompts) for step `{force_step}` is **identical** "
-            "to the hash recorded at the time of its last failure. "
-            "Retrying with the same code will produce the same error.\n\n"
-            "> **IMPORTANT — VCR cache mechanics:** Logram only caches steps that "
-            "completed with status SUCCESS or REPLAYED. A FAILED step has **no cache "
-            "entry**. In replay mode it always runs live automatically — you do NOT "
-            "need `force_step` to rerun it after a fix.\n\n"
-            f"> **Correct call after editing `{force_step}`:**\n"
-            "> ```\n"
-            "> run_surgical_replay(\"<script_path>\")  # no force_step argument\n"
-            "> ```\n"
-            f"> `{force_step}` will run live because its only DB record has status "
-            "FAILED (no cache hit).\n\n"
-            "> If you intended to re-run a **previously successful** step, modify its "
-            "source or global variables first so the logic_hash changes, then retry.\n\n"
-            f"{budget_line}\n"
-            "- Estimated cost avoided: ~$0.05"
-        )
 
     # ── Execute (shell=False enforced — args passed as list) ──────────────────
     env = os.environ.copy()
@@ -797,12 +778,9 @@ def run_surgical_replay(
     if from_step:
         env["LOGRAM_FORCE_FROM"] = from_step
 
-    result = subprocess.run(
-        [sys.executable, str(script)],   # list → shell=False by default
-        env=env,
-        capture_output=True,
-        text=True,
-    )
+    result = _run_script([sys.executable, str(script)], env=env)  # list → no shell
+    if isinstance(result, str):
+        return f"{result}\n\n{budget_line}"
 
     stderr_snippet = (result.stderr or "")[:2000]
     stdout_snippet = (result.stdout or "")[:1000]
@@ -811,7 +789,6 @@ def run_surgical_replay(
         lines = [
             "## Replay: SUCCESS",
             "- Exit code: 0",
-            cost_line,
             budget_line,
             "",
             "> **VCR reminder:** FAILED steps have no cache — they always run live in replay mode.",
@@ -823,7 +800,6 @@ def run_surgical_replay(
 
     lines = [
         f"## Replay: FAILED (exit code {result.returncode})",
-        cost_line,
         budget_line,
         "",
         "### Stderr",
@@ -869,6 +845,10 @@ def verify_against_golden_dataset(project: str, script_path: str) -> str:
         number of regressed steps per input (if any), and an overall verdict:
         CERTIFIED (all pass) or REGRESSION DETECTED.
     """
+    safe, jail_msg = _is_path_safe(script_path)
+    if not safe:
+        return f"## Security Error — Path Jail Violation\n\n{jail_msg}"
+
     script = Path(script_path)
     if not script.exists():
         return (
@@ -876,11 +856,9 @@ def verify_against_golden_dataset(project: str, script_path: str) -> str:
             "Provide the path to the pipeline entry-point Python file."
         )
 
-    result = subprocess.run(
-        [sys.executable, "-m", "logram.cli", "test", str(script)],
-        capture_output=True,
-        text=True,
-    )
+    result = _run_script([sys.executable, "-m", "logram.cli", "test", str(script)])
+    if isinstance(result, str):
+        return result
 
     stdout = (result.stdout or "").strip()
     stderr = (result.stderr or "")[:1000].strip()

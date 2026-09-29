@@ -300,11 +300,12 @@ Manual configuration (`~/.cursor/mcp.json` or Claude Desktop config):
 | `run_surgical_replay(script_path)` | Validate a fix in ~2 s; only modified steps run live |
 | `verify_against_golden_dataset(project, script_path)` | Check for regressions before closing a bug |
 
-`run_surgical_replay` enforces three safety gates:
+The tools that execute a script (`run_surgical_replay`, `verify_against_golden_dataset`) enforce these safety gates:
 
 - **Path jail**: only `.py` files inside the current working directory.
-- **Circuit breaker**: at most 5 replays per agent session, to bound API cost.
-- **Logic guard**: aborts if the logic hash has not changed since the last failure.
+- **Timeout**: the script is stopped after 15 minutes.
+- **Circuit breaker** (`run_surgical_replay`): at most 5 replays per agent session, to bound API cost.
+- **Logic guard** (`run_surgical_replay`): refuses `force_step` on a step whose last run failed. That step has no cache entry and already runs live, so forcing it only repeats the failure; the refusal does not consume the replay budget.
 
 ---
 
