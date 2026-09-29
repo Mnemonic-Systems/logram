@@ -26,12 +26,16 @@ Design pillars
    plain attribute read (SAFE), while ``getattr(self, dyn)`` is volatile.
 4. **MRO method resolution** — ``self.helper()`` and ``cls.helper()`` are
    resolved through ``func.__qualname__`` → enclosing class → ``cls.__mro__``,
-   unwrapping ``@classmethod`` / ``@staticmethod`` / ``@property`` descriptors.
+   unwrapping ``@classmethod`` / ``@staticmethod`` / ``@property`` descriptors;
+   ``self.CONSTANT`` reads capture the class constant. Instantiating a project
+   class adds all of its methods to the call graph.
 5. **Cycle-safe, user-space-only recursion** — visited-set prevents infinite
    loops; a 256-node budget bounds runtime; stdlib/site-packages calls are
    not descended into.
-6. **No memory addresses in hashes** — non-primitive values are summarized by
-   ``type.__qualname__`` only, never via ``repr()`` (which leaks ``0x...`` ids).
+6. **No memory addresses in hashes** — values are captured by content when
+   their state is well defined (builtins, compiled regexes, enums, dates,
+   dataclasses, Pydantic models) and by ``type.__qualname__`` otherwise, never
+   via an arbitrary ``repr()`` (which leaks ``0x...`` ids).
 7. **No silent truncation** — containers too large (or too deep) to be stored
    verbatim in the snapshot are summarized with a digest of their *full*
    content, so a change anywhere in them changes the fingerprint.
@@ -40,15 +44,24 @@ Design pillars
 from __future__ import annotations
 
 import ast
+import dataclasses
+import datetime
+import decimal
+import enum
+import fractions
+import functools
 import hashlib
 import inspect
 import json
 import logging
 import os
+import pathlib
+import re
 import sys
 import sysconfig
 import textwrap
 import types
+import uuid
 import weakref
 from typing import Any, Iterable
 
@@ -159,6 +172,8 @@ def _fully_unwrap(func: Any) -> Any:
         unwrapped = inspect.unwrap(func)
     except Exception:
         unwrapped = func
+    while isinstance(unwrapped, functools.partial):
+        unwrapped = unwrapped.func  # the code that actually runs
     return _unwrap_descriptor(unwrapped)
 
 
@@ -593,6 +608,42 @@ def _deep_value_snapshot(value: Any, *, depth: int = 0) -> Any:
                 break
             out[str(k)] = _deep_value_snapshot(v, depth=depth + 1)
         return out if len(value) <= _MAX_DICT_ITEMS else _container_summary(value, out)
+    # Value objects with a well-defined, address-free state are captured by value.
+    if isinstance(value, functools.partial):
+        return {
+            "__partial__": _deep_value_snapshot(value.func, depth=depth + 1),
+            "args": _deep_value_snapshot(list(value.args), depth=depth + 1),
+            "keywords": _deep_value_snapshot(dict(value.keywords), depth=depth + 1),
+        }
+    if isinstance(value, re.Pattern):
+        pattern = value.pattern if isinstance(value.pattern, str) else value.pattern.hex()
+        return {"__regex__": pattern, "flags": value.flags}
+    if isinstance(value, enum.Enum):
+        return {
+            "__enum__": f"{type(value).__qualname__}.{value.name}",
+            "value": _deep_value_snapshot(value.value, depth=depth + 1),
+        }
+    if isinstance(
+        value,
+        (datetime.date, datetime.time, datetime.timedelta, decimal.Decimal, fractions.Fraction, uuid.UUID, pathlib.PurePath),
+    ):
+        return {"__value__": repr(value)}
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {
+            "__dataclass__": type(value).__qualname__,
+            "fields": {
+                f.name: _deep_value_snapshot(getattr(value, f.name, None), depth=depth + 1)
+                for f in dataclasses.fields(value)
+            },
+        }
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump) and not isinstance(value, type):
+        try:
+            state = model_dump()
+        except Exception:
+            state = None
+        if isinstance(state, dict):
+            return {"__model__": type(value).__qualname__, "fields": _deep_value_snapshot(state, depth=depth + 1)}
     if isinstance(value, types.ModuleType):
         return {"__module__": getattr(value, "__name__", "<unknown>")}
     if isinstance(value, type):
@@ -629,6 +680,17 @@ def _resolve_class_for_method(func: Any) -> type | None:
             return None
         cur = getattr(cur, part, None)
     return cur if isinstance(cur, type) else None
+
+
+def _user_space_methods(cls: type) -> list[tuple[str, Any]]:
+    """Project-defined functions of ``cls`` and its bases (methods, class/static methods, properties)."""
+    methods = []
+    for klass in cls.__mro__:
+        for attr in vars(klass).values():
+            fn = _unwrap_descriptor(attr)
+            if inspect.isfunction(fn) and _is_user_space_callable(fn):
+                methods.append((fn.__qualname__, fn))
+    return methods
 
 
 def _resolve_via_mro(cls: type, name: str) -> Any:
@@ -692,9 +754,21 @@ def _resolve_attribute_chain(root_value: Any, attrs: tuple[str, ...]) -> tuple[b
     return True, cur
 
 
+def _class_constant(cls: type, name: str) -> tuple[bool, Any]:
+    """Class-level (not instance) data attribute ``name`` of ``cls``, found through the MRO."""
+    for klass in cls.__mro__:
+        if name in klass.__dict__:
+            value = klass.__dict__[name]
+            if callable(value) or isinstance(value, (property, classmethod, staticmethod)):
+                return False, None
+            return True, value
+    return False, None
+
+
 def _capture_resolved_globals(
     scavenger: _ASTScavenger,
     g: dict[str, Any],
+    bound_cls: type | None = None,
 ) -> dict[str, Any]:
     """Snapshot the *runtime values* of names the function actually reads."""
     out: dict[str, Any] = {}
@@ -708,15 +782,16 @@ def _capture_resolved_globals(
             # Modules are recorded only structurally; their attrs come via chains.
             out[name] = {"__module__": getattr(val, "__name__", "<unknown>")}
             continue
-        if callable(val) and not isinstance(val, type):
-            out[name] = {
-                "__callable__": f"{getattr(val, '__module__', '?')}.{getattr(val, '__qualname__', '?')}"
-            }
-            continue
         out[name] = _deep_value_snapshot(val)
 
     # Attribute chains: prompts.MY_PROMPT, config.settings.X.
     for root, attrs in scavenger.attribute_chains:
+        if root in ("__local__:self", "__local__:cls") and attrs and bound_cls is not None:
+            # self.THRESHOLD read in a method: capture the class constant.
+            found, value = _class_constant(bound_cls, attrs[0])
+            if found:
+                out[f"{root.split(':')[1]}.{attrs[0]}"] = _deep_value_snapshot(value)
+            continue
         if root.startswith("__local__:") or not attrs:
             continue
         if root not in g:
@@ -898,12 +973,12 @@ def _compute_single_function_snapshot(func: Any) -> dict[str, Any]:
         scavenger.visit(fn_node)
 
     g = getattr(func, "__globals__", {}) or {}
-    resolved_globals = _capture_resolved_globals(scavenger, g)
+    bound_cls = _resolve_class_for_method(func)
+    resolved_globals = _capture_resolved_globals(scavenger, g, bound_cls)
     closures = _capture_closures(func)
     defaults = _capture_defaults(func)
     annotations = _capture_annotations(func)
 
-    bound_cls = _resolve_class_for_method(func)
     callees: list[tuple[str, Any]] = []
     seen_qns: set[str] = set()
     for target in scavenger.call_targets:
@@ -917,6 +992,14 @@ def _compute_single_function_snapshot(func: Any) -> dict[str, Any]:
             continue
         callee = _resolve_call_target(target, func, g, bound_cls)
         if callee is None:
+            continue
+        if isinstance(callee, type):
+            # Instantiating a project class: the step depends on all of its code,
+            # whichever methods end up being called on the object.
+            for method_qn, method in _user_space_methods(callee):
+                if method_qn not in seen_qns:
+                    seen_qns.add(method_qn)
+                    callees.append((method_qn, method))
             continue
         callee = _fully_unwrap(callee)
         if not callable(callee):

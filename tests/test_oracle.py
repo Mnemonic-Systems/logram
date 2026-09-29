@@ -102,6 +102,46 @@ def test_fingerprint_is_deterministic() -> None:
             id="global-object-attribute-read",
         ),
         pytest.param(
+            "import re\nP = re.compile(r'a+')\ndef f(s):\n    return P.findall(s)\n",
+            "import re\nP = re.compile(r'b+')\ndef f(s):\n    return P.findall(s)\n",
+            id="global-compiled-regex",
+        ),
+        pytest.param(
+            "from dataclasses import dataclass\n@dataclass\nclass C:\n    t: float\nCFG = C(0.7)\ndef f():\n    return read(CFG)\ndef read(c):\n    return c.t\n",
+            "from dataclasses import dataclass\n@dataclass\nclass C:\n    t: float\nCFG = C(0.9)\ndef f():\n    return read(CFG)\ndef read(c):\n    return c.t\n",
+            id="global-dataclass-instance",
+        ),
+        pytest.param(
+            "from pydantic import BaseModel\nclass C(BaseModel):\n    t: float\nCFG = C(t=0.7)\ndef f():\n    return read(CFG)\ndef read(c):\n    return c.t\n",
+            "from pydantic import BaseModel\nclass C(BaseModel):\n    t: float\nCFG = C(t=0.9)\ndef f():\n    return read(CFG)\ndef read(c):\n    return c.t\n",
+            id="global-pydantic-instance",
+        ),
+        pytest.param(
+            "class E:\n    def total(self, x):\n        return x * 2\ndef f(x):\n    return E().total(x)\n",
+            "class E:\n    def total(self, x):\n        return x * 3\ndef f(x):\n    return E().total(x)\n",
+            id="method-of-object-created-in-step",
+        ),
+        pytest.param(
+            "class E:\n    def total(self, x):\n        return x * 2\ndef f(x):\n    e = E()\n    return e.total(x)\n",
+            "class E:\n    def total(self, x):\n        return x * 3\ndef f(x):\n    e = E()\n    return e.total(x)\n",
+            id="method-of-object-in-local-variable",
+        ),
+        pytest.param(
+            "class E:\n    RATE = 2\n    def total(self, x):\n        return x * self.RATE\ndef f(x):\n    return E().total(x)\n",
+            "class E:\n    RATE = 3\n    def total(self, x):\n        return x * self.RATE\ndef f(x):\n    return E().total(x)\n",
+            id="class-constant-read-through-self",
+        ),
+        pytest.param(
+            "import functools\ndef _w(x, k):\n    return x * k\nW = functools.partial(_w, k=2)\ndef f(x):\n    return W(x)\n",
+            "import functools\ndef _w(x, k):\n    return x * k\nW = functools.partial(_w, k=3)\ndef f(x):\n    return W(x)\n",
+            id="partial-bound-argument",
+        ),
+        pytest.param(
+            "import functools\ndef _w(x, k):\n    return x * k\nW = functools.partial(_w, k=2)\ndef f(x):\n    return W(x)\n",
+            "import functools\ndef _w(x, k):\n    return x + k\nW = functools.partial(_w, k=2)\ndef f(x):\n    return W(x)\n",
+            id="partial-wrapped-function-body",
+        ),
+        pytest.param(
             "def f(x, scale=2):\n    return x * scale\n",
             "def f(x, scale=3):\n    return x * scale\n",
             id="default-argument",
@@ -124,6 +164,19 @@ class A:
     a1 = load_module(src.format(factor=2)).A.parent
     a2 = load_module(src.format(factor=3)).A.parent
     assert fingerprint(a1) != fingerprint(a2)
+
+
+def test_class_constant_read_by_traced_method_invalidates() -> None:
+    src = """
+class Pipeline:
+    THRESHOLD = {value}
+
+    def keep(self, xs):
+        return [x for x in xs if x >= self.THRESHOLD]
+"""
+    before = load_module(src.format(value=0.5)).Pipeline.keep
+    after = load_module(src.format(value=0.8)).Pipeline.keep
+    assert fingerprint(before) != fingerprint(after)
 
 
 def test_closure_value_change_invalidates() -> None:
