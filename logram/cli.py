@@ -2233,7 +2233,11 @@ def doctor() -> None:
     logram_dir = DB_PATH.parent
     if logram_dir.exists():
         writable = os.access(logram_dir, os.W_OK)
-        rows.append((".logram/", _ok() if writable else _warn(), str(logram_dir) + (" (read-only!)" if not writable else "")))
+        try:
+            shown = str(logram_dir.relative_to(Path.cwd()))
+        except ValueError:
+            shown = str(logram_dir)
+        rows.append((".logram/", _ok() if writable else _warn(), shown + (" (read-only!)" if not writable else "")))
     else:
         rows.append((".logram/", _fail(), "directory missing — run your pipeline first"))
 
