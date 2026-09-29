@@ -582,7 +582,6 @@ Use these ONLY when the default behavior produces wrong cache hits or wrong cach
 | `ignore_in_hash=["timestamp", "request_id"]` | Argument is observability-only, has zero effect on output. Including it would force a cache miss every run. |
 | `vcr_key_fn=lambda f, a, kw: (..., ...)` | Default key is too broad (large object, lossy compaction) OR control flow depends on dynamic dispatch the Oracle cannot resolve statically. Must return `(args_repr, kwargs_repr)`. |
 | `log_input_fn=lambda f, a, kw: {...}` | `logram view` displays unhelpful argument representations. Affects DISPLAY only, not cache key. |
-| `compact_inputs=False` | Need full-fidelity input in `logram view` for diagnostic reasons. Trade-off: bigger SQLite rows. |
 | `track_args=["accumulator"]` | The function mutates a mutable argument in-place (return is `None` or unused) and downstream code depends on the mutation. |
 | `state_in_hash=False` | Method on a `@stateful` class that does NOT read `self.*` — pure helper. |
 | `include_state=[...]` / `exclude_state=[...]` | Method only depends on a subset of the class's `@stateful` fields. |

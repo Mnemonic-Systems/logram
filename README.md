@@ -58,7 +58,7 @@ Freezing unchanged steps addresses all four.
 
 A decorator-based SDK (`@logram.trace`) that records a pipeline's logic, data flow and state, **entirely locally**, and provides four capabilities on top of that record:
 
-1. **Logic fingerprinting.** Before a step runs, Logram computes a fingerprint of its code from the abstract syntax tree, the runtime values of the constants it reads, and the functions it calls, recursively. Formatting, comments and Python-version changes do not affect it; semantic changes do.
+1. **Logic fingerprinting.** Before a step runs, Logram computes a fingerprint of its code from the abstract syntax tree, the runtime values of the constants it reads, and the functions it calls, recursively. Formatting, comments, docstrings and Python-version changes do not affect it; semantic changes do.
 2. **Replay.** Unchanged steps are replayed from a local SQLite store in about 1 ms. Only modified logic, and the steps that consume its new output, execute live.
 3. **Divergence analysis.** When two runs disagree, Logram walks the call graph of both and reports exactly what changed, down to a prompt constant three levels deep, with a unified diff.
 4. **Agent interface.** A native MCP server exposes the trace store to coding agents (Claude, Cursor), which can inspect what ran, locate the cause of a divergence, apply a change, validate it by replay, and check it against reference runs.
@@ -169,12 +169,12 @@ fingerprint = SHA-256(
 | Layer | What it captures | Stability |
 |---|---|---|
 | Structural AST hash | Canonical tree: every node, operator and branch | Invariant to whitespace, comments, docstrings and `ast.unparse` formatting drift |
-| Resolved globals | Runtime values of every constant the function reads (`dict`, `list`, `str`, `int`, `float`, `bool`) | Detects `CONFIG['temperature'] = 0.7 → 0.9` without any source change |
+| Resolved globals | Runtime values of every constant the function reads (`dict`, `list`, `tuple`, `set`, `str`, `int`, `float`, `bool`), including reads inside lambdas, comprehensions and nested functions | Detects `CONFIG['temperature'] = 0.7 → 0.9` without any source change. Large containers are stored as a preview plus a digest of their full content, so a change anywhere invalidates |
 | Closures and defaults | `__closure__` cell contents, positional and keyword defaults | Captures factory-built callables and parameter-baked configuration |
 | Callee Merkle tree | Recursive hash of every user-space function reachable through the call graph | A change in a helper at depth 5 invalidates the parent, in O(N), cycle-safe, bounded at 256 nodes |
 | Volatility markers | Deterministic tags for `eval`, `exec`, `compile`, dynamic `getattr` | Identical code gives an identical hash, even with dynamic constructs |
 
-**Cross-version stability.** Upgrading from Python 3.10 to 3.13, reformatting with `black` or `ruff format`, adding docstrings or editing comments leaves the fingerprint unchanged. Only a semantic edit produces a new hash.
+**Cross-version stability.** Upgrading from Python 3.10 to 3.13, reformatting with `black` or `ruff format`, adding docstrings or editing comments leaves the fingerprint unchanged. Only a semantic edit produces a new hash. The test suite pins a reference fingerprint that CI checks on every supported Python version.
 
 **Method resolution.** Most caching engines treat `self.helper(x)` as opaque: `helper` is neither a global nor a closure. The Oracle recovers the enclosing class from `func.__qualname__`, walks the method resolution order (`cls.__mro__`), and resolves through `@classmethod`, `@staticmethod` and `@property`:
 
@@ -418,7 +418,7 @@ def extract_quantities(page: Page) -> ExtractionResult:
 
 ### 3. Give custom objects a stable identity
 
-Arguments follow a different path from code. Primitives get stable content-based keys automatically; custom classes fall back to `repr()`, which often contains a memory address that changes every run and defeats replay. Implement `__logram_trace_key__`:
+Arguments follow a different path from code. Primitives, containers, Pydantic models and dataclasses get content-based keys automatically (every element counts; long strings and bytes are hashed). Other classes fall back to `repr()`, which often contains a memory address that changes every run and defeats replay. Implement `__logram_trace_key__`:
 
 ```python
 class ImageTile:
@@ -458,13 +458,12 @@ The Oracle errs on the side of re-execution rather than stale cache.
 
 - Comments, whitespace, blank lines, docstrings.
 - `black` / `ruff` reformatting.
-- Python minor-version upgrades. Complex constructs (f-strings, `match`, walrus) can show a small `ast.unparse` drift; run `clear_logic_snapshot_cache()` or delete `.logram/` to rebuild cleanly.
-- Renaming a parameter, adding a type annotation, reordering keyword arguments at a call site: either invariant, or invalidated only when the change is real.
+- Python minor-version upgrades (3.10 → 3.13).
 
 **Invalidates correctly**
 
-- Editing a function body (structural AST hash).
-- Changing a constant value (runtime global resolution).
+- Editing a function body (structural AST hash), including renaming a parameter or changing a type annotation.
+- Changing a constant value (runtime global resolution), wherever it sits in a container.
 - Modifying a callee at any depth of the user-space call graph (Merkle aggregation).
 - Changing a method called through `self.method()` (MRO traversal).
 - Adding or removing `eval`, `exec` or dynamic `getattr` (volatility markers).
@@ -481,6 +480,22 @@ def fn(x):
 ```
 
 Constants from inline-imported modules are not captured as resolved globals. Editing the function itself still invalidates it; only changes to the imported module's constants are invisible. Move imports to the top of the file (as `ruff E402` also recommends).
+
+</details>
+
+<details>
+<summary><strong>Objects stored in globals</strong></summary>
+
+Built-in values (`dict`, `list`, `str`, numbers…) read from a global are captured by content. Any other object read as a whole (a config class instance, a NumPy array) is captured by type only:
+
+```python
+SETTINGS = Settings(temperature=0.7)
+
+def fn(x):
+    return call_llm(x, SETTINGS)    # SETTINGS captured as "Settings", not by value
+```
+
+Attribute reads are resolved (`SETTINGS.temperature` in the body is captured by value). Otherwise pass the object as an argument, where it is keyed by content (Pydantic, dataclass) or by `__logram_trace_key__`.
 
 </details>
 
@@ -751,20 +766,6 @@ async def classify(self, text: str, timestamp: float, request_id: str) -> str: .
 ```
 
 **Diagnostic:** if a step keeps running live in replay mode, look for `[PROBE 3][HashComponents]` in the logs. A field of `COMPONENT_args_repr` that differs between runs but should not matter belongs in `ignore_in_hash`.
-
-</details>
-
-<details>
-<summary><strong><code>compact_inputs=False</code></strong>: full-fidelity input logging</summary>
-
-Large inputs are compacted by default (strings over 220 characters are hashed, lists truncated at 16 items), which keeps the store small but makes `logram view` show a truncated view. Disable compaction on steps whose full input you need to audit, such as the one receiving the raw prompt:
-
-```python
-@logram.trace(compact_inputs=False)
-async def send_to_llm(self, prompt: str, context: dict) -> str: ...
-```
-
-Trade-off: larger rows; use it on diagnostic steps, not everywhere.
 
 </details>
 
