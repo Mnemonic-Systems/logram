@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import multiprocessing
 import sqlite3
 import subprocess
 import sys
 import textwrap
 from pathlib import Path
+
+import pytest
 
 from .conftest import run_script, step_statuses
 
@@ -170,3 +173,57 @@ def test_import_has_no_filesystem_side_effects(workspace: Path) -> None:
     )
     assert not (workspace / ".logram").exists()
     assert not (workspace / ".logram_assets").exists()
+
+
+MULTIPROCESS_PIPELINE = """
+import asyncio
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
+
+import logram
+
+
+@logram.trace()
+def square(x):
+    return x * x
+
+
+async def main():
+    run_id = logram.init(project="demo", input_id="doc-1")
+    context = multiprocessing.get_context("{start_method}")
+    with ProcessPoolExecutor(2, mp_context=context, initializer=logram.worker_init, initargs=(run_id,)) as pool:
+        print("RESULT", list(pool.map(square, range(8))))
+    await logram.finalize(status="success")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+"""
+
+
+@pytest.mark.parametrize(
+    "start_method",
+    [
+        "spawn",
+        pytest.param(
+            "fork",
+            marks=pytest.mark.skipif(
+                "fork" not in multiprocessing.get_all_start_methods(), reason="fork unavailable"
+            ),
+        ),
+    ],
+)
+def test_steps_run_in_worker_processes_are_all_persisted(workspace: Path, start_method: str) -> None:
+    script = workspace / "pool.py"
+    script.write_text(textwrap.dedent(MULTIPROCESS_PIPELINE.format(start_method=start_method)))
+
+    for replay in (False, True):
+        proc = run_script(script, replay=replay)
+        assert result_line(proc) == "RESULT [0, 1, 4, 9, 16, 25, 36, 49]"
+        conn = sqlite3.connect(workspace / ".logram" / "logram.db")
+        try:
+            (run_id,) = conn.execute("SELECT run_id FROM runs ORDER BY created_at DESC LIMIT 1").fetchone()
+            rows = conn.execute("SELECT status FROM steps WHERE run_id = ? AND name = 'square'", (run_id,)).fetchall()
+        finally:
+            conn.close()
+        assert len(rows) == 8, f"replay={replay}: only {len(rows)}/8 worker steps persisted"

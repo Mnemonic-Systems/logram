@@ -13,6 +13,7 @@ import sqlite3
 import threading
 import time
 import uuid
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -72,6 +73,12 @@ def resolve_db_path() -> Path:
     return _detect_project_root() / ".logram" / "logram.db"
 
 
+def _fork_hook(ref: weakref.ReferenceType[TraceStorage], method: str) -> None:
+    storage = ref()
+    if storage is not None:
+        getattr(storage, method)()
+
+
 class TraceStorage:
     """
     SQLite-backed Logram storage (runs, steps, logic_registry, values_registry).
@@ -91,6 +98,38 @@ class TraceStorage:
         self._setup_lock = threading.RLock()
         self._db_ready = False
         self._replay_hint_shown = False
+
+        # Held by the writer thread while it is inside SQLite, and taken before
+        # fork(): a child forked mid-write would inherit SQLite's internal locks
+        # in a held state and hang on its first write.
+        self._sqlite_lock = threading.Lock()
+        if hasattr(os, "register_at_fork"):
+            ref = weakref.ref(self)
+            os.register_at_fork(
+                before=lambda: _fork_hook(ref, "_before_fork"),
+                after_in_parent=lambda: _fork_hook(ref, "_after_fork_in_parent"),
+                after_in_child=lambda: _fork_hook(ref, "_reset_after_fork"),
+            )
+
+    def _before_fork(self) -> None:
+        self._sqlite_lock.acquire()
+
+    def _after_fork_in_parent(self) -> None:
+        self._sqlite_lock.release()
+
+    def _reset_after_fork(self) -> None:
+        """Give a forked child its own queue, locks and writer thread.
+
+        The parent's writer thread does not exist in the child, and the copied
+        queue may hold a lock that thread owned at fork time. Items pending in
+        the copy belong to the parent, which will write them itself.
+        """
+        self._sqlite_lock = threading.Lock()
+        self._queue = queue.Queue(maxsize=50_000)
+        self._worker_started = False
+        self._worker_thread = None
+        self._worker_stop = threading.Event()
+        self._setup_lock = threading.RLock()
 
     @property
     def db_path(self) -> Path:
@@ -795,10 +834,22 @@ class TraceStorage:
     ) -> None:
         if not step_batch and not run_updates:
             return
+        with self._sqlite_lock:
+            self._write_batch_locked(conn, step_batch, run_updates)
 
+    def _write_batch_locked(
+        self,
+        conn: sqlite3.Connection,
+        step_batch: list[_StepRequest],
+        run_updates: dict[str, _RunUpdateRequest],
+    ) -> None:
         now = time.time()
         try:
-            conn.execute("BEGIN")
+            # IMMEDIATE takes the write lock up front. A deferred BEGIN that reads
+            # first (replay rows look up their source step) cannot upgrade to a
+            # write once another process has committed: SQLite then fails with
+            # "database is locked" right away instead of waiting for the lock.
+            conn.execute("BEGIN IMMEDIATE")
 
             for req in step_batch:
                 def _as_int_or_none(value: Any) -> int | None:
@@ -1055,6 +1106,12 @@ class TraceStorage:
 
             conn.commit()
         except Exception:
+            log.warning(
+                "[Logram] failed to persist a batch of %d step(s) and %d run update(s); they are lost",
+                len(step_batch),
+                len(run_updates),
+                exc_info=True,
+            )
             try:
                 conn.rollback()
             except Exception:
@@ -1067,10 +1124,11 @@ class TraceStorage:
         last_flush = time.monotonic()
 
         try:
-            self._ensure_db()
-            conn = sqlite3.connect(self.db_path, timeout=_DB_TIMEOUT_SEC)
-            conn.row_factory = sqlite3.Row
-            self._configure_connection(conn)
+            with self._sqlite_lock:
+                self._ensure_db()
+                conn = sqlite3.connect(self.db_path, timeout=_DB_TIMEOUT_SEC)
+                conn.row_factory = sqlite3.Row
+                self._configure_connection(conn)
         except Exception:
             conn = None
 
@@ -1118,7 +1176,8 @@ class TraceStorage:
         if conn is not None:
             try:
                 self._write_batch(conn, step_batch, run_updates)
-                conn.close()
+                with self._sqlite_lock:
+                    conn.close()
             except Exception:
                 pass
 

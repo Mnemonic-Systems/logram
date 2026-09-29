@@ -129,6 +129,7 @@ def worker_init(
       inheriting open SQLite connections from the parent.
     """
     import atexit
+    from multiprocessing import util as mp_util
 
     from .decorators import storage as _storage
 
@@ -137,10 +138,12 @@ def worker_init(
         current_input_id.set(input_id)
 
     # The write thread inside each worker process is a daemon — it is killed
-    # when the process exits, before it can flush the queue. Registering
-    # flush_sync as an atexit handler ensures every enqueued step is written
-    # to SQLite before the worker process terminates.
+    # when the process exits, before it can flush the queue. Flush on exit:
+    # atexit covers spawned workers and non-multiprocessing pools (Celery, Ray);
+    # forked multiprocessing children exit through os._exit and skip atexit on
+    # Python < 3.13, but multiprocessing still runs its own finalizers.
     atexit.register(_storage.flush_sync)
+    mp_util.Finalize(None, _storage.flush_sync, exitpriority=100)
 
     if verbose:
         import os as _os
