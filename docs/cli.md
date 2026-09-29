@@ -1,5 +1,7 @@
 # CLI reference
 
+[← README](../README.md) · [How it works](how-it-works.md) · [Limitations](limitations.md) · **CLI** · [Advanced usage](advanced.md) · [Agent interface](mcp.md) · [Design](design.md) · [Benchmarks](../benchmarks/README.md)
+
 The CLI is built on [Typer](https://typer.tiangolo.com/) and [Rich](https://rich.readthedocs.io/): step trees, syntax-highlighted code, unified diffs and progress bars in the terminal.
 
 | Command | Description |

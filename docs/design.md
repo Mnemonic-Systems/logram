@@ -1,5 +1,7 @@
 # Design and positioning
 
+[← README](../README.md) · [How it works](how-it-works.md) · [Limitations](limitations.md) · [CLI](cli.md) · [Advanced usage](advanced.md) · [Agent interface](mcp.md) · **Design** · [Benchmarks](../benchmarks/README.md)
+
 ## Motivation
 
 Multi-step pipelines built on LLM or VLM calls are slow, costly and non-deterministic. Consider a pipeline that processes 150 image tiles through a VLM, where a logic error appears at step 97 (the figures below are an illustrative order of magnitude, not a measurement). Testing a fix today means:

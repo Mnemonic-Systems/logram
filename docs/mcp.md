@@ -1,5 +1,7 @@
 # Agent interface (MCP)
 
+[← README](../README.md) · [How it works](how-it-works.md) · [Limitations](limitations.md) · [CLI](cli.md) · [Advanced usage](advanced.md) · **Agent interface** · [Design](design.md) · [Benchmarks](../benchmarks/README.md)
+
 Coding agents such as Claude and Cursor work from static source files. When a pipeline fails at step 97, the agent can read the code but not what actually ran. Logram's MCP server gives it access to the trace store, so it can:
 
 - **Analyze**: identify failing runs, or read the exact runtime prompts of a successful baseline.

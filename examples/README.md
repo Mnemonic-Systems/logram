@@ -1,5 +1,7 @@
 # Examples
 
+[← README](../README.md) · [CLI reference](../docs/cli.md)
+
 ## `invoice_pipeline.py`
 
 A six-page extraction pipeline followed by a summary, built on a fake LLM client

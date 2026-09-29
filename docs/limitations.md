@@ -1,5 +1,7 @@
 # Guarantees, best practices and limitations
 
+[← README](../README.md) · [How it works](how-it-works.md) · **Limitations** · [CLI](cli.md) · [Advanced usage](advanced.md) · [Agent interface](mcp.md) · [Design](design.md) · [Benchmarks](../benchmarks/README.md)
+
 Logram tracks data flow, not system resources. The Oracle traces the code you write, not the code Python generates at runtime. The following rules make the difference between good and exact replays.
 
 ## 1. Return data, not resources

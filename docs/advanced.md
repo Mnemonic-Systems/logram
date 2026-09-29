@@ -1,5 +1,7 @@
 # Advanced usage
 
+[← README](../README.md) · [How it works](how-it-works.md) · [Limitations](limitations.md) · [CLI](cli.md) · **Advanced usage** · [Agent interface](mcp.md) · [Design](design.md) · [Benchmarks](../benchmarks/README.md)
+
 ## `vcr_key_fn`: custom cache key
 
 By default, all named arguments enter the cache key. For custom objects this can cause **false misses**: fields that change between runs without affecting the output (a counter, an embedded timestamp) change the key every time. `vcr_key_fn` pins the key to the fields that define identity. It is also the only option for third-party classes you cannot modify.

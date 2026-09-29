@@ -1,5 +1,7 @@
 # How it works
 
+[← README](../README.md) · **How it works** · [Limitations](limitations.md) · [CLI](cli.md) · [Advanced usage](advanced.md) · [Agent interface](mcp.md) · [Design](design.md) · [Benchmarks](../benchmarks/README.md)
+
 Before a traced step runs, Logram computes a **cache key** from the step's
 logic fingerprint, its arguments, the run's `input_id` and, for stateful
 classes, the tracked object state. In replay mode, a key already recorded for

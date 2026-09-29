@@ -1,5 +1,7 @@
 # Benchmarks
 
+[← README](../README.md) · [How it works](../docs/how-it-works.md) · [Limitations](../docs/limitations.md)
+
 Two questions matter for a replay cache: **is it sound** (does it ever serve a
 stale result?) and **what does it cost**?
 
