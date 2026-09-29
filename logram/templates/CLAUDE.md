@@ -32,7 +32,7 @@ logram/
 ├── metrics.py           # token usage extraction, ROI computation
 ├── analysis.py          # logic divergence analysis (recursive callee diff)
 ├── mcp_server.py        # Model Context Protocol server for autonomous agents
-├── cli.py               # Typer CLI (logram inspect / replay / diff / stats / mcp / ...)
+├── cli/                 # Typer CLI (logram inspect / replay / diff / stats / mcp / ...), one module per topic
 └── server/              # local FastAPI dashboard (read-only)
 ```
 
