@@ -526,7 +526,7 @@ class TraceStorage:
                         conn2.close()
                     if existing:
                         stored_hashes = [(r[0], r[1]) for r in existing]
-                        log.warning(
+                        log.info(
                             "[Logram][PROBE 5][MISS_DETAIL] func=%s "
                             "searched_hash=%s "
                             "stored_hashes_for_same_func=%s "
@@ -537,7 +537,7 @@ class TraceStorage:
                             stored_hashes,
                         )
                     else:
-                        log.warning(
+                        log.info(
                             "[Logram][PROBE 5][MISS_DETAIL] func=%s searched_hash=%s "
                             "NO ROWS AT ALL for this func_name in steps table "
                             ">>> Run-1 data was never persisted (flush race, crash before flush, or wrong DB path).",
