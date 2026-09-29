@@ -116,3 +116,45 @@ def test_golden_test_detects_regression_in_any_call_and_fails(cli_paths: Path) -
     regressed = runner.invoke(cli.app, ["test", str(script)])
     assert regressed.exit_code == 1, regressed.output
     assert regressed.output.count("1 step(s) differ") == 2
+
+
+def _record_nested_run(project: str = "nested") -> None:
+    import time
+
+    @logram.trace()
+    def inner() -> int:
+        time.sleep(0.1)
+        return 1
+
+    @logram.trace()
+    def outer() -> int:
+        return inner()
+
+    async def main() -> None:
+        logram.init(project=project, input_id="doc")
+        outer()
+        await logram.finalize(status="success")
+
+    asyncio.run(main())
+
+
+def test_inspect_accepts_negative_run_offsets(cli_paths: Path) -> None:
+    _record_nested_run("first")
+    _record_nested_run("second")
+    runner = CliRunner()
+    latest = runner.invoke(cli.app, ["inspect", "-1"])
+    previous = runner.invoke(cli.app, ["inspect", "-2"])
+    assert latest.exit_code == 0, latest.output
+    assert previous.exit_code == 0, previous.output
+    assert "second" in latest.output
+    assert "first" in previous.output
+
+
+def test_inspect_total_counts_nested_steps_once(cli_paths: Path) -> None:
+    import re
+
+    _record_nested_run()
+    result = CliRunner().invoke(cli.app, ["inspect", "last"])
+    assert result.exit_code == 0, result.output
+    total = float(re.search(r"Total: ([0-9.]+)s", result.output).group(1))
+    assert 0.09 <= total < 0.18, result.output

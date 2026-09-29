@@ -567,6 +567,16 @@ def _sum_metric_keys(obj: Any, keys: tuple[str, ...]) -> float:
 # ---------------------------------------------------------------------------
 
 
+def _top_level_steps(steps: list[StepRecord]) -> list[StepRecord]:
+    """Steps not nested in another step of the same run (their durations don't overlap)."""
+    ids = {s.step_id for s in steps}
+    return [s for s in steps if not s.parent_step_id or s.parent_step_id not in ids]
+
+
+# Lets "-1", "-2"… reach the run_id argument instead of being parsed as options.
+_RUN_ID_ARG_SETTINGS = {"ignore_unknown_options": True}
+
+
 def _resolve_run_id(conn: sqlite3.Connection, token: str) -> str:
     """Resolve a shorthand token (last, fail, -1, -2…) to a real run_id."""
     t = token.strip()
@@ -855,7 +865,7 @@ def list_runs(
         conn.close()
 
 
-@app.command()
+@app.command(context_settings=_RUN_ID_ARG_SETTINGS)
 def inspect(run_id: str = typer.Argument(..., autocompletion=_complete_run_id)) -> None:
     """Affiche l'arbre chronologique d'exécution d'un run. Accepte: last, fail, -1, -2…"""
     conn = _connect_db()
@@ -952,10 +962,12 @@ def inspect(run_id: str = typer.Argument(..., autocompletion=_complete_run_id)) 
         console.print(tree)
 
         # Summary footer
-        total_dur = sum(s.duration for s in steps)
+        # Nested steps run inside their parent: count each root once.
+        roots = _top_level_steps(steps)
+        total_dur = sum(s.duration for s in roots)
         live_dur = sum(
             s.duration
-            for s in steps
+            for s in roots
             if s.status.upper() not in {"REPLAYED", "CACHE_HIT", "REPLAY_HIT"}
         )
         replayed_count = sum(
@@ -1204,7 +1216,7 @@ def replay(
         conn.close()
 
 
-@app.command()
+@app.command(context_settings=_RUN_ID_ARG_SETTINGS)
 def diff(
     run_a: str | None = typer.Argument(None, autocompletion=_complete_run_id),
     run_b: str | None = typer.Argument(None, autocompletion=_complete_run_id),
@@ -1617,7 +1629,7 @@ def recover(logic_hash: str) -> None:
         conn.close()
 
 
-@app.command()
+@app.command(context_settings=_RUN_ID_ARG_SETTINGS)
 def restore(run_id: str = typer.Argument(..., autocompletion=_complete_run_id)) -> None:
     """MVP anti-erreur: affiche les blocs de code à recopier pour revenir à l'état d'un run. Accepte: last, fail, -1…"""
     conn = _connect_db()
@@ -1975,7 +1987,7 @@ def test(script_py: str) -> None:
         conn.close()
 
 
-@app.command()
+@app.command(context_settings=_RUN_ID_ARG_SETTINGS)
 def stats(
     run_id_arg: str | None = typer.Argument(None, metavar="[RUN_ID]", autocompletion=_complete_run_id),
     run_id: str | None = typer.Option(None, "--run-id", help="Scope Run: stats d'un run précis."),
@@ -2493,7 +2505,7 @@ def live(
             if step.step_id not in seen:
                 add_node(tree, step)
 
-        total_dur = sum(s.duration for s in steps)
+        total_dur = sum(s.duration for s in _top_level_steps(steps))
         footer = Text(f"  {len(steps)} step(s)  ·  {total_dur:.2f}s", style="lg.muted")
 
         parts: list[Any] = [header, Text(""), tree, Text(""), footer]
