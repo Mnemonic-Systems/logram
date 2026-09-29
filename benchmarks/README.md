@@ -33,7 +33,7 @@ benchmark does not try.
 python benchmarks/mutation_soundness.py
 ```
 
-| | v0.3.0 (before this work) | current |
+| | v0.3.0 | v0.4.0 |
 |---|---|---|
 | (mutant, step) pairs whose output changed | 111 | 111 |
 | **false hits** | **18 (16.2%)** | **0** |

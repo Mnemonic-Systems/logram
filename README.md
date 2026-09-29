@@ -4,7 +4,7 @@
 
 ![Python](https://img.shields.io/badge/Python-3.10%E2%80%933.13-blue?style=flat-square)
 ![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)
-![Version](https://img.shields.io/badge/version-0.3.0-blueviolet?style=flat-square)
+![Version](https://img.shields.io/badge/version-0.4.0-blueviolet?style=flat-square)
 [![CI](https://github.com/Mnemonic-Systems/logram/actions/workflows/ci.yml/badge.svg)](https://github.com/Mnemonic-Systems/logram/actions/workflows/ci.yml)
 
 Logram records every traced step of a pipeline (inputs, outputs, object state, and the exact code and constants that produced them) in a local store. On the next run, each step is looked up by a fingerprint of its logic and arguments: if nothing relevant changed, the recorded output is replayed; otherwise the step runs live. Editing one prompt at step 97 re-executes only what depends on that edit.
@@ -75,7 +75,7 @@ Details: [how it works](docs/how-it-works.md).
 
 A [mutation benchmark](benchmarks/) applies every single-point mutation (constant, arithmetic or comparison operator) to a corpus of pipeline-like steps and compares each step's **actual output** with its fingerprint. An output that changes while the fingerprint does not is a stale replay.
 
-| | v0.3.0 | current |
+| | v0.3.0 | v0.4.0 |
 |---|---|---|
 | stale replays (false hits) out of 111 behaviour changes | 18 (16.2%) | **0** |
 | unneeded reruns out of 1,280 unchanged outputs (upper bound) | 1.0% | 1.6% |
@@ -92,6 +92,9 @@ The fingerprint covers the code under your project directory and the values it r
 A local MCP server lets coding agents (Claude Code, Cursor) read what actually ran, locate what changed between two runs, validate a fix by replay and check it against reference runs. `pip install "logram-sdk[mcp]"`, then `logram init && logram mcp install`. See [agent interface](docs/mcp.md).
 
 ## Documentation
+
+Changes between versions are listed in the [changelog](CHANGELOG.md).
+
 
 - [How it works](docs/how-it-works.md): fingerprint, cache key, stateful replay, divergence analysis, storage, serialization.
 - [Guarantees and limitations](docs/limitations.md): what triggers a rerun, known blind spots, multiprocessing.

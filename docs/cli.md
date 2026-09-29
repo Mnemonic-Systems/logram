@@ -151,7 +151,7 @@ logram doctor
 
   check                status     detail
   Python               ✓ ok       3.12.3
-  Logram SDK           ✓ ok       0.3.0
+  Logram SDK           ✓ ok       0.4.0
   .logram/             ✓ ok       /path/to/.logram
   logram.db            ✓ ok       142 KB · 12 run(s)
   Claude Code MCP      ✓ ok       logram found in ~/.claude.json
