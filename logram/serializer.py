@@ -64,6 +64,11 @@ def _detect_project_root() -> Path:
     return Path.cwd().resolve()
 
 
+def resolve_assets_dir() -> Path:
+    """Directory holding content-addressed blobs: ``<project root>/.logram_assets``."""
+    return _detect_project_root() / ".logram_assets"
+
+
 class BlobManager:
     """Content-addressed store for binary payloads. Directories are created on first write."""
 

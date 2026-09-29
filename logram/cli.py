@@ -7,6 +7,7 @@ import difflib
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -30,6 +31,7 @@ from rich.tree import Tree
 
 from .analysis import find_all_divergences
 from .metrics import aggregate_roi_stats, aggregate_token_efficiency, top_inputs_by_savings
+from .serializer import _detect_project_root, resolve_assets_dir
 from .storage import resolve_db_path
 from .theme import (
     PANEL_BOX,
@@ -45,7 +47,8 @@ from .theme import (
 
 APP_NAME = "Logram Control Center"
 DB_PATH = resolve_db_path()
-ASSETS_DIR = Path(".logram_assets")
+ASSETS_DIR = resolve_assets_dir()
+_BLOB_FILE_RE = re.compile(r"^[0-9a-f]{64}\.[A-Za-z0-9]+$")
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 _AGENT_RULES_FILES: list[tuple[str, str]] = [
@@ -231,6 +234,42 @@ def _extract_blobs(obj: Any) -> list[dict[str, Any]]:
 
     walk(obj)
     return found
+
+
+def _referenced_blob_hashes(conn: sqlite3.Connection) -> set[str]:
+    """Hashes of every blob referenced by step inputs/outputs/errors or tracked state."""
+    hashes: set[str] = set()
+    for query in (
+        "SELECT inputs_json, output_json, error_json FROM steps",
+        "SELECT value_json FROM values_registry",
+    ):
+        try:
+            rows = conn.execute(query).fetchall()
+        except sqlite3.OperationalError:
+            continue  # older store without this table
+        for row in rows:
+            for raw in row:
+                for blob in _extract_blobs(_parse_json(raw)):
+                    if isinstance(blob.get("hash"), str):
+                        hashes.add(blob["hash"])
+    return hashes
+
+
+def _orphan_assets(conn: sqlite3.Connection) -> list[Path]:
+    """Blob files (``<sha256>.<ext>``) that nothing in the store references anymore."""
+    if not ASSETS_DIR.is_dir():
+        return []
+    referenced = _referenced_blob_hashes(conn)
+    return [
+        p
+        for p in ASSETS_DIR.iterdir()
+        if p.is_file() and _BLOB_FILE_RE.match(p.name) and p.name.split(".", 1)[0] not in referenced
+    ]
+
+
+def _resolve_blob_file(blob: dict[str, Any]) -> Path:
+    path = Path(str(blob.get("path", "")))
+    return path if path.is_absolute() else _detect_project_root() / path
 
 
 def _json_text(value: Any) -> str:
@@ -1658,7 +1697,7 @@ def open_step(step_id: str) -> None:
         raise typer.Exit(1)
 
     try:
-        row = conn.execute("SELECT output_json FROM steps WHERE step_id = ?", (step_id,)).fetchone()
+        row = conn.execute("SELECT inputs_json, output_json FROM steps WHERE step_id = ?", (step_id,)).fetchone()
         if not row:
             console.print()
             console.print(
@@ -1671,8 +1710,8 @@ def open_step(step_id: str) -> None:
             )
             raise typer.Exit(1)
 
-        output = _parse_json(row["output_json"])
-        blobs = _extract_blobs(output)
+        # Inputs first: that is what a VLM step actually received.
+        blobs = _extract_blobs(_parse_json(row["inputs_json"])) + _extract_blobs(_parse_json(row["output_json"]))
         if not blobs:
             console.print()
             console.print(Text("  No blob detected on this step.", style="lg.muted"))
@@ -1680,7 +1719,7 @@ def open_step(step_id: str) -> None:
             return
 
         for blob in blobs:
-            path = Path(str(blob.get("path", "")))
+            path = _resolve_blob_file(blob)
             if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tiff"} and _open_with_system(path):
                 console.print()
                 opened = Text()
@@ -2142,18 +2181,7 @@ def clean() -> None:
         failed_runs = conn.execute("SELECT run_id FROM runs WHERE UPPER(status) IN ('FAILED', 'FAILURE', 'ERROR')").fetchall()
         failed_count = len(failed_runs)
 
-        db_blob_paths: set[str] = set()
-        rows = conn.execute("SELECT output_json FROM steps").fetchall()
-        for row in rows:
-            output = _parse_json(row["output_json"])
-            for blob in _extract_blobs(output):
-                p = blob.get("path")
-                if isinstance(p, str):
-                    db_blob_paths.add(str(Path(p)))
-
-        ASSETS_DIR.mkdir(parents=True, exist_ok=True)
-        all_assets = [p for p in ASSETS_DIR.rglob("*") if p.is_file()]
-        orphan_assets = [p for p in all_assets if str(p) not in db_blob_paths]
+        orphan_assets = _orphan_assets(conn)
 
         console.print()
         preview = Table(
@@ -2317,15 +2345,8 @@ def doctor() -> None:
             failed_count = _c.execute(
                 "SELECT COUNT(*) AS n FROM runs WHERE UPPER(status) IN ('FAILED','FAILURE','ERROR')"
             ).fetchone()["n"]
-            db_blob_paths: set[str] = set()
-            for _row in _c.execute("SELECT output_json FROM steps").fetchall():
-                for blob in _extract_blobs(_parse_json(_row["output_json"])):
-                    p = blob.get("path")
-                    if isinstance(p, str):
-                        db_blob_paths.add(str(Path(p)))
+            orphan_count = len(_orphan_assets(_c))
             _c.close()
-            if ASSETS_DIR.exists():
-                orphan_count = sum(1 for p in ASSETS_DIR.rglob("*") if p.is_file() and str(p) not in db_blob_paths)
         except Exception:
             pass
 

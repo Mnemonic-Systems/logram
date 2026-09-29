@@ -313,7 +313,7 @@ All trace data lives in a SQLite database on your machine. Binary payloads (imag
 .logram/
   logram.db            # runs, steps, logic_registry, values_registry
 .logram_assets/
-  <sha256_prefix>/     # deduplicated binary blobs
+  <sha256>.bin         # deduplicated binary blobs
 ```
 
 WAL mode is enabled by default, so `logram inspect` can run while a pipeline is writing.
