@@ -28,7 +28,7 @@ from typing import Optional
 from fastmcp import FastMCP
 
 from .analysis import find_all_divergences
-
+from .storage import resolve_db_path
 
 # ---------------------------------------------------------------------------
 # Security constants & circuit breaker state
@@ -52,7 +52,7 @@ def _reset_replay_counter() -> None:
 # ---------------------------------------------------------------------------
 
 def _db_path() -> Path:
-    return Path(os.environ.get("LOGRAM_DB_PATH", ".logram/logram.db"))
+    return resolve_db_path()
 
 
 def _connect() -> sqlite3.Connection:

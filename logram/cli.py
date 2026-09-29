@@ -7,11 +7,11 @@ import difflib
 import json
 import logging
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
 import time
-import shutil
 import webbrowser
 from collections import defaultdict
 from dataclasses import dataclass
@@ -21,7 +21,6 @@ from typing import Any
 
 import typer
 from click.shell_completion import CompletionItem as _CompletionItem
-from rich import box
 from rich.panel import Panel
 from rich.progress_bar import ProgressBar
 from rich.syntax import Syntax
@@ -31,6 +30,7 @@ from rich.tree import Tree
 
 from .analysis import find_all_divergences
 from .metrics import aggregate_roi_stats, aggregate_token_efficiency, top_inputs_by_savings
+from .storage import resolve_db_path
 from .theme import (
     PANEL_BOX,
     TABLE_BOX,
@@ -44,7 +44,7 @@ from .theme import (
 )
 
 APP_NAME = "Logram Control Center"
-DB_PATH = Path(".logram") / "logram.db"
+DB_PATH = resolve_db_path()
 ASSETS_DIR = Path(".logram_assets")
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
@@ -2496,7 +2496,7 @@ def mcp_start(
     if db_path:
         os.environ["LOGRAM_DB_PATH"] = db_path
 
-    effective_db = os.environ.get("LOGRAM_DB_PATH", ".logram/logram.db")
+    effective_db = str(resolve_db_path())
 
     console.print()
     info = Text()
@@ -2534,7 +2534,7 @@ def mcp_config(
 ) -> None:
     """Affiche le bloc JSON à copier dans Cursor (Settings › MCP) ou Claude Desktop."""
     python_bin = sys.executable
-    effective_db = db_path or os.environ.get("LOGRAM_DB_PATH", str(Path(".logram") / "logram.db"))
+    effective_db = db_path or str(resolve_db_path())
 
     config: dict[str, Any] = {
         "logram": {

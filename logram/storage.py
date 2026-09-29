@@ -61,23 +61,27 @@ class _StopRequest:
     __slots__ = ()
 
 
+def resolve_db_path() -> Path:
+    """Location of the trace store, shared by the SDK, the CLI and the MCP server.
+
+    ``LOGRAM_DB_PATH`` wins; otherwise ``<project root>/.logram/logram.db``.
+    """
+    env_path = os.environ.get("LOGRAM_DB_PATH")
+    if env_path:
+        return Path(env_path).expanduser().resolve()
+    return _detect_project_root() / ".logram" / "logram.db"
+
+
 class TraceStorage:
     """
-    SQLite-backed Logram storage.
+    SQLite-backed Logram storage (runs, steps, logic_registry, values_registry).
 
-    DB path: .logram/logram.db
-    - runs
-    - steps
-    - logic_registry
+    The database location is resolved lazily on first use (see
+    ``resolve_db_path``), so importing Logram never touches the filesystem.
     """
 
-    def __init__(self, filename: str = ".logram_traces.json") -> None:
-        # Kept for backward compatibility with old constructor signature.
-        self.legacy_path = Path(filename)
-
-        self.base_dir = _detect_project_root() / ".logram"
-        self.base_dir.mkdir(parents=True, exist_ok=True)
-        self.db_path = self.base_dir / "logram.db"
+    def __init__(self) -> None:
+        self._db_path: Path | None = None
 
         self._queue: queue.Queue[_StepRequest | _RunUpdateRequest | _FlushRequest | _StopRequest] = queue.Queue(maxsize=50_000)
         self._worker_started = False
@@ -87,6 +91,14 @@ class TraceStorage:
         self._setup_lock = threading.RLock()
         self._db_ready = False
         self._replay_hint_shown = False
+
+    @property
+    def db_path(self) -> Path:
+        if self._db_path is None:
+            path = resolve_db_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._db_path = path
+        return self._db_path
 
     def _replay_mode(self) -> bool:
         return os.environ.get("LOGRAM_REPLAY") == "true"

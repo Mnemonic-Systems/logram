@@ -15,6 +15,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
+from ..storage import resolve_db_path
 from .models import (
     CompareChange,
     CompareResponse,
@@ -42,7 +43,6 @@ LOG = logging.getLogger("logram.server")
 
 BLOB_HASH_RE = re.compile(r"^[a-f0-9]{64}$")
 
-DEFAULT_DB_PATH = Path(".logram") / "logram.db"
 DEFAULT_ASSETS_DIR = Path(".logram_assets")
 
 
@@ -423,7 +423,7 @@ def create_app(*, db_path: Path | None = None, assets_dir: Path | None = None) -
     if not logging.getLogger().handlers:
         logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 
-    db_path_resolved = (db_path or DEFAULT_DB_PATH).resolve()
+    db_path_resolved = (db_path or resolve_db_path()).resolve()
     assets_dir_resolved = (assets_dir or DEFAULT_ASSETS_DIR).resolve()
 
     fastapi_app = FastAPI(title="Logram Dashboard Read API", version="1.0.0")
