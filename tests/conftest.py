@@ -48,10 +48,20 @@ def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-def load_module(source: str, directory: Path | None = None, *, name: str | None = None) -> Any:
-    """Import ``source`` as a fresh module backed by a real file (inspect.getsource needs one)."""
-    name = name or f"_logram_test_mod_{next(_module_counter)}"
-    path = (directory or Path.cwd()) / f"{name}.py"
+SUBJECT_MODULE = "logram_subject"
+
+
+def load_module(source: str, *, name: str = SUBJECT_MODULE) -> Any:
+    """Import ``source`` as a fresh module backed by a real file (inspect.getsource needs one).
+
+    Variants share one module name by default: the name is part of the
+    fingerprint (``module.qualname`` of referenced functions), so two variants
+    loaded under different names would always differ. Each variant gets its own
+    directory, so inspect never reads a stale source.
+    """
+    directory = Path.cwd() / f"variant_{next(_module_counter)}"
+    directory.mkdir()
+    path = directory / f"{name}.py"
     path.write_text(textwrap.dedent(source))
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None and spec.loader is not None
