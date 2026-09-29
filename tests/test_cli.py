@@ -62,3 +62,57 @@ def test_clean_only_deletes_unreferenced_blobs(cli_paths: Path, monkeypatch: pyt
     assert all(p.exists() for p in referenced)
     assert not orphan.exists()
     assert unrelated.exists()
+
+
+GOLDEN_PIPELINE = """
+import asyncio
+import os
+
+import logram
+
+
+@logram.trace()
+def score(x):
+    return {body}
+
+
+async def main():
+    logram.init(project="golden", input_id=os.environ.get("LOGRAM_INPUT_ID", "doc-a"))
+    print([score(x) for x in range(3)])
+    await logram.finalize(status="success")
+
+
+asyncio.run(main())
+"""
+
+
+def _golden_run_ids(db: Path) -> list[str]:
+    import sqlite3
+
+    conn = sqlite3.connect(db)
+    try:
+        return [r[0] for r in conn.execute("SELECT run_id FROM runs ORDER BY created_at")]
+    finally:
+        conn.close()
+
+
+def test_golden_test_detects_regression_in_any_call_and_fails(cli_paths: Path) -> None:
+    from .conftest import run_script
+
+    script = cli_paths / "pipeline.py"
+    script.write_text(GOLDEN_PIPELINE.format(body="x * 10"))
+    run_script(script)
+    run_script(script, env={"LOGRAM_INPUT_ID": "doc-b"})
+    runner = CliRunner()
+    for run_id in _golden_run_ids(cli_paths / ".logram" / "logram.db"):
+        assert runner.invoke(cli.app, ["golden", "add", run_id]).exit_code == 0
+
+    unchanged = runner.invoke(cli.app, ["test", str(script)])
+    assert unchanged.exit_code == 0, unchanged.output
+    assert unchanged.output.count("no regression") == 2
+
+    # Only the first of three calls changes: every call must be compared.
+    script.write_text(GOLDEN_PIPELINE.format(body="-1 if x == 0 else x * 10"))
+    regressed = runner.invoke(cli.app, ["test", str(script)])
+    assert regressed.exit_code == 1, regressed.output
+    assert regressed.output.count("1 step(s) differ") == 2

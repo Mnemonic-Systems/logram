@@ -36,7 +36,8 @@ def init(
     """
     ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     rid = f"{run_name}_{ts}" if run_name else f"run_{ts}"
-    input_key = input_id or "unknown_input"
+    # ``logram test`` replays each golden input by setting LOGRAM_INPUT_ID.
+    input_key = os.environ.get("LOGRAM_INPUT_ID") or input_id or "unknown_input"
     version_id = get_semantic_version()
 
     # Force fresh on-disk/introspection scan for each new run lifecycle.

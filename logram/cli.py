@@ -313,6 +313,14 @@ def _step_dict_by_name(conn: sqlite3.Connection, run_id: str) -> dict[str, dict[
     return data
 
 
+def _outputs_by_step_name(conn: sqlite3.Connection, run_id: str) -> dict[str, list[str]]:
+    """Every output of every call, grouped by step name, in a run-order-independent form."""
+    outputs: dict[str, list[str]] = defaultdict(list)
+    for row in conn.execute("SELECT name, output_json FROM steps WHERE run_id = ?", (run_id,)):
+        outputs[row["name"]].append(_json_text(_parse_json(row["output_json"])))
+    return {name: sorted(values) for name, values in outputs.items()}
+
+
 def _step_rows_for_alias_resolution(conn: sqlite3.Connection, run_id: str) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
@@ -1889,6 +1897,7 @@ def test(script_py: str) -> None:
         report.add_column("result")
         report.add_column("details", style="lg.muted")
 
+        failed_inputs = 0
         for input_id, baseline in baseline_by_input.items():
             before = conn.execute("SELECT MAX(created_at) AS ts FROM runs").fetchone()["ts"]
 
@@ -1898,6 +1907,7 @@ def test(script_py: str) -> None:
 
             proc = subprocess.run([sys.executable, str(script_path)], env=env, check=False)
             if proc.returncode != 0:
+                failed_inputs += 1
                 report.add_row(
                     input_id,
                     baseline["run_id"],
@@ -1919,6 +1929,7 @@ def test(script_py: str) -> None:
             ).fetchone()
 
             if not new_run:
+                failed_inputs += 1
                 report.add_row(
                     input_id,
                     baseline["run_id"],
@@ -1928,16 +1939,13 @@ def test(script_py: str) -> None:
                 )
                 continue
 
-            base_steps = _step_dict_by_name(conn, baseline["run_id"])
-            new_steps = _step_dict_by_name(conn, new_run["run_id"])
-            all_steps = set(base_steps) | set(new_steps)
-
-            regressions = 0
-            for name in all_steps:
-                b_out = _json_text(_parse_json(base_steps[name]["output_json"])) if name in base_steps else "<missing>"
-                n_out = _json_text(_parse_json(new_steps[name]["output_json"])) if name in new_steps else "<missing>"
-                if b_out != n_out:
-                    regressions += 1
+            # A step can run many times (one call per tile, per page...): compare
+            # every call, independently of the order parallel workers finished in.
+            base_steps = _outputs_by_step_name(conn, baseline["run_id"])
+            new_steps = _outputs_by_step_name(conn, new_run["run_id"])
+            regressions = sum(
+                1 for name in set(base_steps) | set(new_steps) if base_steps.get(name) != new_steps.get(name)
+            )
 
             if regressions == 0:
                 report.add_row(
@@ -1948,6 +1956,7 @@ def test(script_py: str) -> None:
                     "no regression",
                 )
             else:
+                failed_inputs += 1
                 report.add_row(
                     input_id,
                     baseline["run_id"],
@@ -1958,6 +1967,8 @@ def test(script_py: str) -> None:
 
         console.print(report)
         console.print()
+        if failed_inputs:
+            raise typer.Exit(1)
 
     finally:
         conn.close()

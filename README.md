@@ -671,7 +671,7 @@ doc_invoice_87    run_20260420...  run_20260425...  ✗ FAILED   2 step(s) diffe
 doc_invoice_103   run_20260420...  run_20260425...  ✓ SUCCESS  no regression
 ```
 
-`logram test` exits with code 1 on any regression, so it can run in CI. `logram restore <run_id>` prints all source blocks and global snapshots of a run as copy-pasteable panels, to revert a function manually to a known-good state.
+`logram test` replays the script once per reference input, with `LOGRAM_INPUT_ID` set to that input (`logram.init()` uses it as the run's `input_id`; the script should load the matching document, e.g. `os.environ.get("LOGRAM_INPUT_ID", "doc_42")`). Every call of every step is compared, and the command exits with code 1 on any regression, so it can run in CI. `logram restore <run_id>` prints all source blocks and global snapshots of a run as copy-pasteable panels, to revert a function manually to a known-good state.
 
 </details>
 
