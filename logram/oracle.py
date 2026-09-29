@@ -26,28 +26,44 @@ Design pillars
    plain attribute read (SAFE), while ``getattr(self, dyn)`` is volatile.
 4. **MRO method resolution** — ``self.helper()`` and ``cls.helper()`` are
    resolved through ``func.__qualname__`` → enclosing class → ``cls.__mro__``,
-   unwrapping ``@classmethod`` / ``@staticmethod`` / ``@property`` descriptors.
+   unwrapping ``@classmethod`` / ``@staticmethod`` / ``@property`` descriptors;
+   ``self.CONSTANT`` reads capture the class constant. Instantiating a project
+   class adds all of its methods to the call graph.
 5. **Cycle-safe, user-space-only recursion** — visited-set prevents infinite
    loops; a 256-node budget bounds runtime; stdlib/site-packages calls are
    not descended into.
-6. **No memory addresses in hashes** — non-primitive values are summarized by
-   ``type.__qualname__`` only, never via ``repr()`` (which leaks ``0x...`` ids).
+6. **No memory addresses in hashes** — values are captured by content when
+   their state is well defined (builtins, compiled regexes, enums, dates,
+   dataclasses, Pydantic models) and by ``type.__qualname__`` otherwise, never
+   via an arbitrary ``repr()`` (which leaks ``0x...`` ids).
+7. **No silent truncation** — containers too large (or too deep) to be stored
+   verbatim in the snapshot are summarized with a digest of their *full*
+   content, so a change anywhere in them changes the fingerprint.
 """
 
 from __future__ import annotations
 
 import ast
+import dataclasses
+import datetime
+import decimal
+import enum
+import fractions
+import functools
 import hashlib
 import inspect
 import json
 import logging
 import os
+import pathlib
+import re
 import sys
 import sysconfig
 import textwrap
 import types
+import uuid
 import weakref
-from typing import Any, Callable, Iterable
+from typing import Any, Iterable
 
 log = logging.getLogger(__name__)
 
@@ -85,7 +101,7 @@ _AST_FIELDS_IGNORE = frozenset({
     "lineno", "col_offset", "end_lineno", "end_col_offset",
 })
 
-# Module-level memoization. Keyed by id(unwrapped_func). Cleared at af.init().
+# Module-level memoization. Keyed by id(unwrapped_func). Cleared by logram.init().
 _FUNCTION_HASH_CACHE: dict[int, str] = {}
 _FUNCTION_SNAPSHOT_CACHE: weakref.WeakValueDictionary[int, dict] = weakref.WeakValueDictionary()
 _AST_TREE_CACHE: weakref.WeakValueDictionary[int, ast.AST] = weakref.WeakValueDictionary()
@@ -156,6 +172,8 @@ def _fully_unwrap(func: Any) -> Any:
         unwrapped = inspect.unwrap(func)
     except Exception:
         unwrapped = func
+    while isinstance(unwrapped, functools.partial):
+        unwrapped = unwrapped.func  # the code that actually runs
     return _unwrap_descriptor(unwrapped)
 
 
@@ -309,18 +327,21 @@ class _ScopeAnalyzer(ast.NodeVisitor):
             self._bind(target.value)
 
 
+def _argument_names(args: ast.arguments) -> set[str]:
+    names = {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
+    if args.vararg is not None:
+        names.add(args.vararg.arg)
+    if args.kwarg is not None:
+        names.add(args.kwarg.arg)
+    return names
+
+
 def _analyze_scope(fn_node: ast.AST) -> _ScopeAnalyzer:
     analyzer = _ScopeAnalyzer()
     body: Iterable[ast.AST]
     if isinstance(fn_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
         # Args first (so they're in locals before body bindings are evaluated).
-        for arg_grp in (fn_node.args.posonlyargs, fn_node.args.args, fn_node.args.kwonlyargs):
-            for a in arg_grp:
-                analyzer.locals.add(a.arg)
-        if fn_node.args.vararg is not None:
-            analyzer.locals.add(fn_node.args.vararg.arg)
-        if fn_node.args.kwarg is not None:
-            analyzer.locals.add(fn_node.args.kwarg.arg)
+        analyzer.locals.update(_argument_names(fn_node.args))
         body = fn_node.body
     else:
         body = getattr(fn_node, "body", [])
@@ -353,20 +374,43 @@ class _ASTScavenger(ast.NodeVisitor):
         self.call_targets: list[ast.AST] = []
         self._markers: set[str] = set()
 
-    # Don't descend into nested function definitions: their scopes are independent.
-    # Their structure is still hashed because the scavenger sees them via
-    # ``_canonical_ast_node`` over the whole tree, which DOES descend.
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: ARG002
-        return
+    # Nested scopes (inner functions, lambdas, classes) are walked with their own
+    # locals added on top of the enclosing ones, so a global read inside
+    # ``lambda x: x * WEIGHT`` is captured like any other read. Decorators,
+    # defaults and base classes are evaluated in the enclosing scope.
+    def _visit_nested_scope(self, extra_locals: set[str], nodes: Iterable[ast.AST]) -> None:
+        child = _ASTScavenger(self.locals | extra_locals)
+        child.global_reads = self.global_reads
+        child.attribute_chains = self.attribute_chains
+        child.call_targets = self.call_targets
+        child._markers = self._markers
+        for n in nodes:
+            child.visit(n)
 
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:  # noqa: ARG002
-        return
+    def _visit_function_like(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        for n in [*node.decorator_list, *node.args.defaults, *node.args.kw_defaults]:
+            if n is not None:
+                self.visit(n)
+        scope = _analyze_scope(node)
+        self._visit_nested_scope(scope.locals, node.body)
 
-    def visit_Lambda(self, node: ast.Lambda) -> None:  # noqa: ARG002
-        return
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_function_like(node)
 
-    def visit_ClassDef(self, node: ast.ClassDef) -> None:  # noqa: ARG002
-        return
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_function_like(node)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        for n in [*node.args.defaults, *node.args.kw_defaults]:
+            if n is not None:
+                self.visit(n)
+        self._visit_nested_scope(_argument_names(node.args), [node.body])
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        for n in [*node.decorator_list, *node.bases, *node.keywords]:
+            self.visit(n)
+        scope = _analyze_scope(node)
+        self._visit_nested_scope(scope.locals, node.body)
 
     def visit_Name(self, node: ast.Name) -> None:
         if isinstance(node.ctx, ast.Load) and node.id not in self.locals:
@@ -422,6 +466,17 @@ class _ASTScavenger(ast.NodeVisitor):
 # Canonical AST hashing (cross-version stable structure hash)
 # ---------------------------------------------------------------------------
 
+_DOCSTRING_OWNERS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)
+
+
+def _is_docstring(stmt: ast.AST) -> bool:
+    return (
+        isinstance(stmt, ast.Expr)
+        and isinstance(stmt.value, ast.Constant)
+        and isinstance(stmt.value.value, str)
+    )
+
+
 def _canonical_ast_node(node: Any) -> Any:
     if isinstance(node, ast.AST):
         cls = type(node).__name__
@@ -432,6 +487,15 @@ def _canonical_ast_node(node: Any) -> Any:
             try:
                 fval = getattr(node, fname)
             except AttributeError:
+                continue
+            if fname == "body" and isinstance(node, _DOCSTRING_OWNERS) and fval and _is_docstring(fval[0]):
+                fval = fval[1:]
+            # Fields added by newer Python versions (e.g. ``type_params`` in
+            # 3.12) are empty for code that does not use them. Skipping empty
+            # fields keeps the hash identical across interpreter versions; the
+            # field name is part of the encoding, so this cannot conflate two
+            # different trees.
+            if fval is None or fval == []:
                 continue
             out.append([fname, _canonical_ast_node(fval)])
         return out
@@ -460,9 +524,49 @@ def _hash_canonical_ast(fn_node: ast.AST) -> str:
 # Deep value snapshot — addresses-free, deterministic
 # ---------------------------------------------------------------------------
 
+def _canonical_value(value: Any, seen: set[int]) -> Any:
+    """Untruncated, address-free encoding of ``value``; only used to compute digests."""
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        return value if value == value and value not in (float("inf"), float("-inf")) else repr(value)
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return {"__bytes__": hashlib.sha256(bytes(value)).hexdigest()}
+    if isinstance(value, (list, tuple, set, frozenset, dict)):
+        if id(value) in seen:
+            return "__cycle__"
+        seen.add(id(value))
+        try:
+            if isinstance(value, dict):
+                items = sorted(value.items(), key=lambda kv: str(kv[0]))
+                return {"__dict__": [[str(k), _canonical_value(v, seen)] for k, v in items]}
+            encoded = [_canonical_value(v, seen) for v in value]
+            if isinstance(value, (set, frozenset)):
+                return {"__set__": sorted(encoded, key=lambda e: json.dumps(e, sort_keys=True, default=str))}
+            return encoded
+        finally:
+            seen.discard(id(value))
+    return _deep_value_snapshot(value, depth=_MAX_VALUE_DEPTH)
+
+
+def _content_digest(value: Any) -> str:
+    encoded = json.dumps(_canonical_value(value, set()), ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _container_summary(value: Any, preview: Any) -> dict[str, Any]:
+    """Readable preview of a large container, keyed by a digest of its full content."""
+    return {
+        "__container__": type(value).__name__,
+        "len": len(value),
+        "sha256": _content_digest(value),
+        "preview": preview,
+    }
+
+
 def _deep_value_snapshot(value: Any, *, depth: int = 0) -> Any:
-    if depth > _MAX_VALUE_DEPTH:
-        return {"__truncated__": "max_depth"}
+    if depth > _MAX_VALUE_DEPTH and isinstance(value, (list, tuple, set, frozenset, dict)):
+        return _container_summary(value, preview=None)
     if value is None or isinstance(value, bool):
         return value
     if isinstance(value, int):
@@ -482,13 +586,17 @@ def _deep_value_snapshot(value: Any, *, depth: int = 0) -> Any:
         digest = hashlib.sha256(raw).hexdigest()[:12]
         return {"__bytes_blob__": digest, "len": len(raw)}
     if isinstance(value, (list, tuple)):
-        return [_deep_value_snapshot(v, depth=depth + 1) for v in list(value)[:_MAX_LIST_ITEMS]]
+        items = [_deep_value_snapshot(v, depth=depth + 1) for v in list(value)[:_MAX_LIST_ITEMS]]
+        return items if len(value) <= _MAX_LIST_ITEMS else _container_summary(value, items)
     if isinstance(value, (set, frozenset)):
         try:
             ordered = sorted(value, key=lambda x: repr(x))
         except Exception:
             ordered = list(value)
-        return {"__set__": [_deep_value_snapshot(v, depth=depth + 1) for v in ordered[:_MAX_LIST_ITEMS]]}
+        items = [_deep_value_snapshot(v, depth=depth + 1) for v in ordered[:_MAX_LIST_ITEMS]]
+        if len(value) <= _MAX_LIST_ITEMS:
+            return {"__set__": items}
+        return _container_summary(value, {"__set__": items})
     if isinstance(value, dict):
         out: dict[str, Any] = {}
         try:
@@ -499,7 +607,43 @@ def _deep_value_snapshot(value: Any, *, depth: int = 0) -> Any:
             if i >= _MAX_DICT_ITEMS:
                 break
             out[str(k)] = _deep_value_snapshot(v, depth=depth + 1)
-        return out
+        return out if len(value) <= _MAX_DICT_ITEMS else _container_summary(value, out)
+    # Value objects with a well-defined, address-free state are captured by value.
+    if isinstance(value, functools.partial):
+        return {
+            "__partial__": _deep_value_snapshot(value.func, depth=depth + 1),
+            "args": _deep_value_snapshot(list(value.args), depth=depth + 1),
+            "keywords": _deep_value_snapshot(dict(value.keywords), depth=depth + 1),
+        }
+    if isinstance(value, re.Pattern):
+        pattern = value.pattern if isinstance(value.pattern, str) else value.pattern.hex()
+        return {"__regex__": pattern, "flags": value.flags}
+    if isinstance(value, enum.Enum):
+        return {
+            "__enum__": f"{type(value).__qualname__}.{value.name}",
+            "value": _deep_value_snapshot(value.value, depth=depth + 1),
+        }
+    if isinstance(
+        value,
+        (datetime.date, datetime.time, datetime.timedelta, decimal.Decimal, fractions.Fraction, uuid.UUID, pathlib.PurePath),
+    ):
+        return {"__value__": repr(value)}
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {
+            "__dataclass__": type(value).__qualname__,
+            "fields": {
+                f.name: _deep_value_snapshot(getattr(value, f.name, None), depth=depth + 1)
+                for f in dataclasses.fields(value)
+            },
+        }
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump) and not isinstance(value, type):
+        try:
+            state = model_dump()
+        except Exception:
+            state = None
+        if isinstance(state, dict):
+            return {"__model__": type(value).__qualname__, "fields": _deep_value_snapshot(state, depth=depth + 1)}
     if isinstance(value, types.ModuleType):
         return {"__module__": getattr(value, "__name__", "<unknown>")}
     if isinstance(value, type):
@@ -536,6 +680,17 @@ def _resolve_class_for_method(func: Any) -> type | None:
             return None
         cur = getattr(cur, part, None)
     return cur if isinstance(cur, type) else None
+
+
+def _user_space_methods(cls: type) -> list[tuple[str, Any]]:
+    """Project-defined functions of ``cls`` and its bases (methods, class/static methods, properties)."""
+    methods = []
+    for klass in cls.__mro__:
+        for attr in vars(klass).values():
+            fn = _unwrap_descriptor(attr)
+            if inspect.isfunction(fn) and _is_user_space_callable(fn):
+                methods.append((fn.__qualname__, fn))
+    return methods
 
 
 def _resolve_via_mro(cls: type, name: str) -> Any:
@@ -599,9 +754,21 @@ def _resolve_attribute_chain(root_value: Any, attrs: tuple[str, ...]) -> tuple[b
     return True, cur
 
 
+def _class_constant(cls: type, name: str) -> tuple[bool, Any]:
+    """Class-level (not instance) data attribute ``name`` of ``cls``, found through the MRO."""
+    for klass in cls.__mro__:
+        if name in klass.__dict__:
+            value = klass.__dict__[name]
+            if callable(value) or isinstance(value, (property, classmethod, staticmethod)):
+                return False, None
+            return True, value
+    return False, None
+
+
 def _capture_resolved_globals(
     scavenger: _ASTScavenger,
     g: dict[str, Any],
+    bound_cls: type | None = None,
 ) -> dict[str, Any]:
     """Snapshot the *runtime values* of names the function actually reads."""
     out: dict[str, Any] = {}
@@ -615,15 +782,16 @@ def _capture_resolved_globals(
             # Modules are recorded only structurally; their attrs come via chains.
             out[name] = {"__module__": getattr(val, "__name__", "<unknown>")}
             continue
-        if callable(val) and not isinstance(val, type):
-            out[name] = {
-                "__callable__": f"{getattr(val, '__module__', '?')}.{getattr(val, '__qualname__', '?')}"
-            }
-            continue
         out[name] = _deep_value_snapshot(val)
 
     # Attribute chains: prompts.MY_PROMPT, config.settings.X.
     for root, attrs in scavenger.attribute_chains:
+        if root in ("__local__:self", "__local__:cls") and attrs and bound_cls is not None:
+            # self.THRESHOLD read in a method: capture the class constant.
+            found, value = _class_constant(bound_cls, attrs[0])
+            if found:
+                out[f"{root.split(':')[1]}.{attrs[0]}"] = _deep_value_snapshot(value)
+            continue
         if root.startswith("__local__:") or not attrs:
             continue
         if root not in g:
@@ -677,7 +845,8 @@ def _capture_annotations(func: Any) -> dict[str, str]:
         try:
             if isinstance(v, str):
                 out[k] = v
-            elif isinstance(v, type):
+            elif isinstance(v, type) and not isinstance(v, types.GenericAlias):
+                # ``list[str]`` passes ``isinstance(..., type)`` on Python 3.10.
                 out[k] = f"{v.__module__}.{v.__qualname__}"
             else:
                 out[k] = repr(v)
@@ -749,9 +918,7 @@ def _build_function_snapshot(
             registry_out[short] = child_snap
         snapshot["called_functions"] = children
 
-        h = hashlib.sha256(
-            json.dumps(snapshot, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
-        ).hexdigest()
+        h = snapshot_digest(snapshot)
 
         _FUNCTION_HASH_CACHE[fid] = h
         try:
@@ -785,14 +952,10 @@ def _compute_single_function_snapshot(func: Any) -> dict[str, Any]:
 
     structural_hash = _hash_canonical_ast(fn_node)
 
-    # ``source_normalized`` is included for human-readable persistence in the
-    # storage layer (logic_registry table → MCP server display). It is the
-    # output of ``ast.unparse``, whose formatting can drift slightly across
-    # Python minor versions — so adding it to the snapshot re-introduces a
-    # *minor* cross-version coupling on top of the strictly-stable
-    # ``structural_hash``. The trade-off is intentional: registry rows must
-    # show real source code, and a Python upgrade is a legitimate moment to
-    # rebuild the cache via ``clear_logic_snapshot_cache()``.
+    # ``source_normalized`` is kept for human-readable persistence in the
+    # storage layer (logic_registry table → MCP server display). It is excluded
+    # from ``snapshot_digest`` because ``ast.unparse`` formatting drifts across
+    # Python minor versions; ``structural_hash`` carries the same information.
     try:
         source_normalized = ast.unparse(fn_node)
     except Exception:
@@ -810,12 +973,12 @@ def _compute_single_function_snapshot(func: Any) -> dict[str, Any]:
         scavenger.visit(fn_node)
 
     g = getattr(func, "__globals__", {}) or {}
-    resolved_globals = _capture_resolved_globals(scavenger, g)
+    bound_cls = _resolve_class_for_method(func)
+    resolved_globals = _capture_resolved_globals(scavenger, g, bound_cls)
     closures = _capture_closures(func)
     defaults = _capture_defaults(func)
     annotations = _capture_annotations(func)
 
-    bound_cls = _resolve_class_for_method(func)
     callees: list[tuple[str, Any]] = []
     seen_qns: set[str] = set()
     for target in scavenger.call_targets:
@@ -829,6 +992,14 @@ def _compute_single_function_snapshot(func: Any) -> dict[str, Any]:
             continue
         callee = _resolve_call_target(target, func, g, bound_cls)
         if callee is None:
+            continue
+        if isinstance(callee, type):
+            # Instantiating a project class: the step depends on all of its code,
+            # whichever methods end up being called on the object.
+            for method_qn, method in _user_space_methods(callee):
+                if method_qn not in seen_qns:
+                    seen_qns.add(method_qn)
+                    callees.append((method_qn, method))
             continue
         callee = _fully_unwrap(callee)
         if not callable(callee):
@@ -866,6 +1037,21 @@ def _safe_signature(func: Any) -> str:
 # Public API
 # ---------------------------------------------------------------------------
 
+# Stored for humans (``logram recover``, the MCP server) but not hashed:
+# ``source_normalized`` is ``ast.unparse`` output, whose formatting drifts across
+# Python versions, and ``signature`` embeds default-value reprs. Both are fully
+# covered by ``structural_hash`` + ``defaults``.
+_DISPLAY_ONLY_FIELDS = frozenset({"source_normalized", "signature"})
+
+
+def snapshot_digest(snapshot: dict[str, Any]) -> str:
+    """SHA-256 of a logic snapshot: the implementation fingerprint."""
+    hashed = {k: v for k, v in snapshot.items() if k not in _DISPLAY_ONLY_FIELDS}
+    return hashlib.sha256(
+        json.dumps(hashed, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
 def compute_logic_fingerprint(func: Any) -> tuple[dict[str, Any], dict[str, Any]]:
     """Build a deterministic snapshot + callee registry for ``func``.
 
@@ -900,170 +1086,3 @@ def compute_logic_fingerprint(func: Any) -> tuple[dict[str, Any], dict[str, Any]
             "called_functions": {},
             "volatile_markers": ["<volatile:oracle_error>"],
         }, {}
-
-
-# ---------------------------------------------------------------------------
-# Smoke test (run with: python -m logram.oracle)
-# ---------------------------------------------------------------------------
-
-def _smoke_test() -> int:  # pragma: no cover - exercised manually
-    """In-process validation that the oracle satisfies its contract."""
-    import importlib.util
-
-    failures: list[str] = []
-
-    def _hash(snap: dict[str, Any]) -> str:
-        return hashlib.sha256(
-            json.dumps(snap, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
-        ).hexdigest()
-
-    def _make_module(name: str, source: str) -> types.ModuleType:
-        spec = importlib.util.spec_from_loader(name, loader=None)
-        mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
-        # Source must live on disk for inspect.getsource → temp file.
-        import tempfile
-        f = tempfile.NamedTemporaryFile(
-            "w", suffix=".py", delete=False, dir=os.getcwd(), prefix=f"_oracle_smoke_{name}_"
-        )
-        f.write(source)
-        f.flush()
-        f.close()
-        mod.__file__ = f.name
-        spec = importlib.util.spec_from_file_location(name, f.name)
-        mod = importlib.util.module_from_spec(spec)  # type: ignore[assignment, arg-type]
-        spec.loader.exec_module(mod)  # type: ignore[union-attr]
-        return mod
-
-    # --- Test 1: comments / whitespace are invisible to the hash -------------
-    src_a = "def f(x):\n    # this is a comment\n    return x + 1\n"
-    src_b = "def f(x):\n\n    return    x   +    1\n"
-    m_a = _make_module("smoke_t1a", src_a)
-    m_b = _make_module("smoke_t1b", src_b)
-    clear_oracle_cache()
-    snap_a, _ = compute_logic_fingerprint(m_a.f)
-    clear_oracle_cache()
-    snap_b, _ = compute_logic_fingerprint(m_b.f)
-    if _hash(snap_a) != _hash(snap_b):
-        failures.append(
-            f"T1 comments/whitespace invariance: {_hash(snap_a)} != {_hash(snap_b)}"
-        )
-
-    # --- Test 2: mutating a global dict between runs changes the hash --------
-    src_c = "CONFIG = {'temp': 0.7}\ndef g():\n    return CONFIG['temp']\n"
-    m_c = _make_module("smoke_t2", src_c)
-    clear_oracle_cache()
-    snap_c1, _ = compute_logic_fingerprint(m_c.g)
-    m_c.CONFIG["temp"] = 0.9
-    clear_oracle_cache()
-    snap_c2, _ = compute_logic_fingerprint(m_c.g)
-    if _hash(snap_c1) == _hash(snap_c2):
-        failures.append("T2 dict mutation: hash did not change after CONFIG['temp']=0.9")
-
-    # --- Test 3: transitive sub-function change invalidates the parent ------
-    src_d1 = (
-        "def helper(x):\n    return x * 2\n"
-        "def parent(x):\n    return helper(x) + 1\n"
-    )
-    src_d2 = (
-        "def helper(x):\n    return x * 3\n"  # body changed
-        "def parent(x):\n    return helper(x) + 1\n"
-    )
-    m_d1 = _make_module("smoke_t3a", src_d1)
-    m_d2 = _make_module("smoke_t3b", src_d2)
-    clear_oracle_cache()
-    snap_p1, _ = compute_logic_fingerprint(m_d1.parent)
-    clear_oracle_cache()
-    snap_p2, _ = compute_logic_fingerprint(m_d2.parent)
-    if _hash(snap_p1) == _hash(snap_p2):
-        failures.append("T3 transitive callee change: parent hash did not change")
-
-    # --- Test 4: getattr literal == SAFE; getattr dynamic == volatile -------
-    src_e = (
-        "def lit(o):\n    return getattr(o, 'name')\n"
-        "def dyn(o, k):\n    return getattr(o, k)\n"
-    )
-    m_e = _make_module("smoke_t4", src_e)
-    clear_oracle_cache()
-    snap_lit, _ = compute_logic_fingerprint(m_e.lit)
-    clear_oracle_cache()
-    snap_dyn, _ = compute_logic_fingerprint(m_e.dyn)
-    if snap_lit.get("volatile_markers"):
-        failures.append(f"T4 literal getattr should be SAFE, got {snap_lit['volatile_markers']}")
-    if "<volatile:getattr_dyn>" not in (snap_dyn.get("volatile_markers") or []):
-        failures.append(f"T4 dynamic getattr should be volatile, got {snap_dyn.get('volatile_markers')}")
-
-    # --- Test 5: deterministic markers (no time-based nonce) ----------------
-    src_f = "def evil(s):\n    return eval(s)\n"
-    m_f = _make_module("smoke_t5", src_f)
-    clear_oracle_cache()
-    snap_f1, _ = compute_logic_fingerprint(m_f.evil)
-    clear_oracle_cache()
-    snap_f2, _ = compute_logic_fingerprint(m_f.evil)
-    if _hash(snap_f1) != _hash(snap_f2):
-        failures.append("T5 deterministic volatility: same code → same hash even with eval()")
-    if "<volatile:eval>" not in (snap_f1.get("volatile_markers") or []):
-        failures.append("T5 eval should produce <volatile:eval> marker")
-
-    # --- Test 6: self.method() is resolved via MRO --------------------------
-    src_g1 = (
-        "class A:\n"
-        "    def helper(self, x):\n        return x * 2\n"
-        "    def parent(self, x):\n        return self.helper(x) + 1\n"
-    )
-    src_g2 = (
-        "class A:\n"
-        "    def helper(self, x):\n        return x * 3\n"  # changed
-        "    def parent(self, x):\n        return self.helper(x) + 1\n"
-    )
-    m_g1 = _make_module("smoke_t6a", src_g1)
-    m_g2 = _make_module("smoke_t6b", src_g2)
-    clear_oracle_cache()
-    snap_a1, _ = compute_logic_fingerprint(m_g1.A.parent)
-    clear_oracle_cache()
-    snap_a2, _ = compute_logic_fingerprint(m_g2.A.parent)
-    if _hash(snap_a1) == _hash(snap_a2):
-        failures.append("T6 MRO method resolution: parent hash did not pick up helper change")
-    if "A.helper" not in (snap_a1.get("called_functions") or {}):
-        failures.append(f"T6 MRO: A.helper missing from called_functions; got {snap_a1.get('called_functions')}")
-
-    # --- Test 7: cycle safety (mutual recursion does not hang) --------------
-    src_h = (
-        "def a(n):\n    return b(n - 1) if n > 0 else 0\n"
-        "def b(n):\n    return a(n - 1) if n > 0 else 0\n"
-    )
-    m_h = _make_module("smoke_t7", src_h)
-    clear_oracle_cache()
-    snap_a, reg = compute_logic_fingerprint(m_h.a)
-    if "called_functions" not in snap_a:
-        failures.append("T7 cycle safety: snapshot missing called_functions")
-
-    # --- Test 8: shadowing — argument named like a builtin doesn't poison hash
-    src_i = (
-        "def takes_eval(eval, x):\n    return eval(x)\n"  # `eval` is a parameter!
-    )
-    m_i = _make_module("smoke_t8", src_i)
-    clear_oracle_cache()
-    snap_i, _ = compute_logic_fingerprint(m_i.takes_eval)
-    if snap_i.get("volatile_markers"):
-        failures.append(
-            f"T8 shadowing: shadowed `eval` should not produce volatility, got {snap_i['volatile_markers']}"
-        )
-
-    # --- Cleanup tempfiles ---------------------------------------------------
-    for mod in (m_a, m_b, m_c, m_d1, m_d2, m_e, m_f, m_g1, m_g2, m_h, m_i):
-        try:
-            os.unlink(mod.__file__)
-        except Exception:
-            pass
-
-    if failures:
-        print("[oracle smoke] FAILURES:")
-        for f in failures:
-            print("  -", f)
-        return 1
-    print(f"[oracle smoke] all {8} tests passed")
-    return 0
-
-
-if __name__ == "__main__":  # pragma: no cover
-    sys.exit(_smoke_test())

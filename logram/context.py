@@ -1,7 +1,7 @@
 from contextvars import ContextVar
 from typing import Optional
 
-# IDs pour suivre où on en est dans l'arbre d'exécution
+# Where we are in the execution tree.
 current_run_id: ContextVar[Optional[str]] = ContextVar("current_run_id", default=None)
 current_input_id: ContextVar[Optional[str]] = ContextVar("current_input_id", default=None)
 current_step_id: ContextVar[Optional[str]] = ContextVar("current_step_id", default=None)

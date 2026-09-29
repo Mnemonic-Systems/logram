@@ -13,6 +13,7 @@ import sqlite3
 import threading
 import time
 import uuid
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -61,23 +62,33 @@ class _StopRequest:
     __slots__ = ()
 
 
+def resolve_db_path() -> Path:
+    """Location of the trace store, shared by the SDK, the CLI and the MCP server.
+
+    ``LOGRAM_DB_PATH`` wins; otherwise ``<project root>/.logram/logram.db``.
+    """
+    env_path = os.environ.get("LOGRAM_DB_PATH")
+    if env_path:
+        return Path(env_path).expanduser().resolve()
+    return _detect_project_root() / ".logram" / "logram.db"
+
+
+def _fork_hook(ref: weakref.ReferenceType[TraceStorage], method: str) -> None:
+    storage = ref()
+    if storage is not None:
+        getattr(storage, method)()
+
+
 class TraceStorage:
     """
-    SQLite-backed Logram storage.
+    SQLite-backed Logram storage (runs, steps, logic_registry, values_registry).
 
-    DB path: .logram/logram.db
-    - runs
-    - steps
-    - logic_registry
+    The database location is resolved lazily on first use (see
+    ``resolve_db_path``), so importing Logram never touches the filesystem.
     """
 
-    def __init__(self, filename: str = ".logram_traces.json") -> None:
-        # Kept for backward compatibility with old constructor signature.
-        self.legacy_path = Path(filename)
-
-        self.base_dir = _detect_project_root() / ".logram"
-        self.base_dir.mkdir(parents=True, exist_ok=True)
-        self.db_path = self.base_dir / "logram.db"
+    def __init__(self) -> None:
+        self._db_path: Path | None = None
 
         self._queue: queue.Queue[_StepRequest | _RunUpdateRequest | _FlushRequest | _StopRequest] = queue.Queue(maxsize=50_000)
         self._worker_started = False
@@ -87,6 +98,46 @@ class TraceStorage:
         self._setup_lock = threading.RLock()
         self._db_ready = False
         self._replay_hint_shown = False
+
+        # Held by the writer thread while it is inside SQLite, and taken before
+        # fork(): a child forked mid-write would inherit SQLite's internal locks
+        # in a held state and hang on its first write.
+        self._sqlite_lock = threading.Lock()
+        if hasattr(os, "register_at_fork"):
+            ref = weakref.ref(self)
+            os.register_at_fork(
+                before=lambda: _fork_hook(ref, "_before_fork"),
+                after_in_parent=lambda: _fork_hook(ref, "_after_fork_in_parent"),
+                after_in_child=lambda: _fork_hook(ref, "_reset_after_fork"),
+            )
+
+    def _before_fork(self) -> None:
+        self._sqlite_lock.acquire()
+
+    def _after_fork_in_parent(self) -> None:
+        self._sqlite_lock.release()
+
+    def _reset_after_fork(self) -> None:
+        """Give a forked child its own queue, locks and writer thread.
+
+        The parent's writer thread does not exist in the child, and the copied
+        queue may hold a lock that thread owned at fork time. Items pending in
+        the copy belong to the parent, which will write them itself.
+        """
+        self._sqlite_lock = threading.Lock()
+        self._queue = queue.Queue(maxsize=50_000)
+        self._worker_started = False
+        self._worker_thread = None
+        self._worker_stop = threading.Event()
+        self._setup_lock = threading.RLock()
+
+    @property
+    def db_path(self) -> Path:
+        if self._db_path is None:
+            path = resolve_db_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._db_path = path
+        return self._db_path
 
     def _replay_mode(self) -> bool:
         return os.environ.get("LOGRAM_REPLAY") == "true"
@@ -107,8 +158,8 @@ class TraceStorage:
                 conn.close()
             if count > 0:
                 print(
-                    f"[LOGRAM] {count} step(s) en cache — "
-                    "relance avec 'logram replay <script>.py' pour activer le Time-Travel."
+                    f"[LOGRAM] {count} step(s) cached — "
+                    "rerun with 'logram replay <script>.py' to replay them."
                 )
         except Exception:
             pass
@@ -475,7 +526,7 @@ class TraceStorage:
                         conn2.close()
                     if existing:
                         stored_hashes = [(r[0], r[1]) for r in existing]
-                        log.warning(
+                        log.info(
                             "[Logram][PROBE 5][MISS_DETAIL] func=%s "
                             "searched_hash=%s "
                             "stored_hashes_for_same_func=%s "
@@ -486,7 +537,7 @@ class TraceStorage:
                             stored_hashes,
                         )
                     else:
-                        log.warning(
+                        log.info(
                             "[Logram][PROBE 5][MISS_DETAIL] func=%s searched_hash=%s "
                             "NO ROWS AT ALL for this func_name in steps table "
                             ">>> Run-1 data was never persisted (flush race, crash before flush, or wrong DB path).",
@@ -783,10 +834,22 @@ class TraceStorage:
     ) -> None:
         if not step_batch and not run_updates:
             return
+        with self._sqlite_lock:
+            self._write_batch_locked(conn, step_batch, run_updates)
 
+    def _write_batch_locked(
+        self,
+        conn: sqlite3.Connection,
+        step_batch: list[_StepRequest],
+        run_updates: dict[str, _RunUpdateRequest],
+    ) -> None:
         now = time.time()
         try:
-            conn.execute("BEGIN")
+            # IMMEDIATE takes the write lock up front. A deferred BEGIN that reads
+            # first (replay rows look up their source step) cannot upgrade to a
+            # write once another process has committed: SQLite then fails with
+            # "database is locked" right away instead of waiting for the lock.
+            conn.execute("BEGIN IMMEDIATE")
 
             for req in step_batch:
                 def _as_int_or_none(value: Any) -> int | None:
@@ -908,10 +971,11 @@ class TraceStorage:
 
                 self._ensure_run_exists(conn, req.run_id, status="running")
 
-                if logic_hash and self._is_meaningful_logic_snapshot(req.logic_snapshot):
-                    source_code = req.logic_snapshot.get("source_normalized", req.logic_snapshot.get("source") or "")
-                    globals_json = req.logic_snapshot.get("resolved_globals", req.logic_snapshot.get("globals") or {})
-                    called_functions = req.logic_snapshot.get("called_functions") or {}
+                snapshot = req.logic_snapshot
+                if logic_hash and snapshot is not None and self._is_meaningful_logic_snapshot(snapshot):
+                    source_code = snapshot.get("source_normalized", snapshot.get("source") or "")
+                    globals_json = snapshot.get("resolved_globals", snapshot.get("globals") or {})
+                    called_functions = snapshot.get("called_functions") or {}
                     conn.execute(
                         """
                         INSERT INTO logic_registry (logic_hash, name, source_code, globals_json, resolved_globals, called_functions_json, signature)
@@ -920,12 +984,12 @@ class TraceStorage:
                         """,
                         (
                             logic_hash,
-                            str(req.logic_snapshot.get("name") or "unknown"),
+                            str(snapshot.get("name") or "unknown"),
                             str(source_code),
                             self._safe_json_dumps(globals_json),
                             self._safe_json_dumps(globals_json),
                             self._safe_json_dumps(called_functions if isinstance(called_functions, dict) else {}),
-                            str(req.logic_snapshot.get("signature") or ""),
+                            str(snapshot.get("signature") or ""),
                         ),
                     )
 
@@ -1043,6 +1107,12 @@ class TraceStorage:
 
             conn.commit()
         except Exception:
+            log.warning(
+                "[Logram] failed to persist a batch of %d step(s) and %d run update(s); they are lost",
+                len(step_batch),
+                len(run_updates),
+                exc_info=True,
+            )
             try:
                 conn.rollback()
             except Exception:
@@ -1055,10 +1125,11 @@ class TraceStorage:
         last_flush = time.monotonic()
 
         try:
-            self._ensure_db()
-            conn = sqlite3.connect(self.db_path, timeout=_DB_TIMEOUT_SEC)
-            conn.row_factory = sqlite3.Row
-            self._configure_connection(conn)
+            with self._sqlite_lock:
+                self._ensure_db()
+                conn = sqlite3.connect(self.db_path, timeout=_DB_TIMEOUT_SEC)
+                conn.row_factory = sqlite3.Row
+                self._configure_connection(conn)
         except Exception:
             conn = None
 
@@ -1106,7 +1177,8 @@ class TraceStorage:
         if conn is not None:
             try:
                 self._write_batch(conn, step_batch, run_updates)
-                conn.close()
+                with self._sqlite_lock:
+                    conn.close()
             except Exception:
                 pass
 

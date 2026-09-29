@@ -12,7 +12,7 @@ from .decorators import clear_logic_snapshot_cache, stateful, storage, trace
 from .serializer import rehydrate_logram_output
 from .versioning import get_semantic_version
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 
 def set_run_id(run_id: str, *, verbose: bool = False) -> str:
@@ -36,7 +36,8 @@ def init(
     """
     ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     rid = f"{run_name}_{ts}" if run_name else f"run_{ts}"
-    input_key = input_id or "unknown_input"
+    # ``logram test`` replays each golden input by setting LOGRAM_INPUT_ID.
+    input_key = os.environ.get("LOGRAM_INPUT_ID") or input_id or "unknown_input"
     version_id = get_semantic_version()
 
     # Force fresh on-disk/introspection scan for each new run lifecycle.
@@ -129,6 +130,8 @@ def worker_init(
       inheriting open SQLite connections from the parent.
     """
     import atexit
+    from multiprocessing import util as mp_util
+
     from .decorators import storage as _storage
 
     current_run_id.set(run_id)
@@ -136,10 +139,12 @@ def worker_init(
         current_input_id.set(input_id)
 
     # The write thread inside each worker process is a daemon — it is killed
-    # when the process exits, before it can flush the queue. Registering
-    # flush_sync as an atexit handler ensures every enqueued step is written
-    # to SQLite before the worker process terminates.
+    # when the process exits, before it can flush the queue. Flush on exit:
+    # atexit covers spawned workers and non-multiprocessing pools (Celery, Ray);
+    # forked multiprocessing children exit through os._exit and skip atexit on
+    # Python < 3.13, but multiprocessing still runs its own finalizers.
     atexit.register(_storage.flush_sync)
+    mp_util.Finalize(None, _storage.flush_sync, exitpriority=100)
 
     if verbose:
         import os as _os

@@ -11,7 +11,8 @@ import logging
 import math
 import os
 import threading
-from dataclasses import fields as dc_fields, is_dataclass
+from dataclasses import fields as dc_fields
+from dataclasses import is_dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
@@ -63,21 +64,40 @@ def _detect_project_root() -> Path:
     return Path.cwd().resolve()
 
 
+def resolve_assets_dir() -> Path:
+    """Directory holding content-addressed blobs: ``<project root>/.logram_assets``."""
+    return _detect_project_root() / ".logram_assets"
+
+
 class BlobManager:
+    """Content-addressed store for binary payloads. Directories are created on first write."""
+
     def __init__(self, base_path: str | Path = ".logram_assets"):
-        self.project_root = _detect_project_root()
-        raw_base = Path(base_path)
-        self.base_path = raw_base if raw_base.is_absolute() else (self.project_root / raw_base)
-        self.base_path.mkdir(parents=True, exist_ok=True)
-        if not os.access(self.base_path, os.W_OK):
-            raise PermissionError(f"Logram assets directory is not writable: {self.base_path}")
+        self._raw_base = Path(base_path)
+        self._project_root: Path | None = None
         self._lock = threading.Lock()
+
+    @property
+    def project_root(self) -> Path:
+        if self._project_root is None:
+            self._project_root = _detect_project_root()
+        return self._project_root
+
+    @property
+    def base_path(self) -> Path:
+        if self._raw_base.is_absolute():
+            return self._raw_base
+        return self.project_root / self._raw_base
 
     def save_blob(self, data: bytes, ext: str = "bin") -> dict[str, Any]:
         h = hashlib.sha256(data).hexdigest()
         ext_clean = str(ext or "bin").lstrip(".")
         filename = f"{h}.{ext_clean}"
-        path = self.base_path / filename
+        base_path = self.base_path
+        base_path.mkdir(parents=True, exist_ok=True)
+        if not os.access(base_path, os.W_OK):
+            raise PermissionError(f"Logram assets directory is not writable: {base_path}")
+        path = base_path / filename
         with self._lock:
             if not path.exists():
                 path.write_bytes(data)
@@ -137,7 +157,8 @@ def _resolve_tagged_class(module_name: str, model_name: str) -> type | None:
     return obj if isinstance(obj, type) else None
 
 
-def _construct_pydantic(model_cls: type, data: Any) -> Any:
+def _construct_pydantic(model_cls: Any, data: Any) -> Any:
+    """Build a Pydantic v2 (``model_validate``) or v1 (``parse_obj``) model."""
     if hasattr(model_cls, "model_validate"):
         return model_cls.model_validate(data)
     return model_cls.parse_obj(data)
@@ -196,14 +217,15 @@ def _coerce_dataclass_fields(cls: type, state: Any) -> Any:
         args = getattr(hint, "__args__", ())
         # list[SomeDC] where items are plain dicts (old format)
         if origin is list and args and is_dataclass(args[0]) and isinstance(val, list):
-            item_cls = args[0]
+            item_cls: Any = args[0]
             repaired[field_name] = [
                 item_cls(**item) if isinstance(item, dict) and not _is_new_model_tag(item) else item
                 for item in val
             ]
         # SomeDC directly (non-list)
         elif is_dataclass(hint) and isinstance(val, dict) and not _is_new_model_tag(val):
-            repaired[field_name] = hint(**val)
+            dataclass_type: Any = hint
+            repaired[field_name] = dataclass_type(**val)
     return repaired
 
 
