@@ -115,7 +115,7 @@ def _infer_aliased_missing_step_names(
         row = source_steps.get(name)
         if row is None:
             continue
-        cursor = row
+        cursor: aiosqlite.Row | None = row
         hops = 0
         while cursor is not None and hops < 200:
             hops += 1

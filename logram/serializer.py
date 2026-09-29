@@ -157,7 +157,8 @@ def _resolve_tagged_class(module_name: str, model_name: str) -> type | None:
     return obj if isinstance(obj, type) else None
 
 
-def _construct_pydantic(model_cls: type, data: Any) -> Any:
+def _construct_pydantic(model_cls: Any, data: Any) -> Any:
+    """Build a Pydantic v2 (``model_validate``) or v1 (``parse_obj``) model."""
     if hasattr(model_cls, "model_validate"):
         return model_cls.model_validate(data)
     return model_cls.parse_obj(data)
@@ -216,14 +217,15 @@ def _coerce_dataclass_fields(cls: type, state: Any) -> Any:
         args = getattr(hint, "__args__", ())
         # list[SomeDC] where items are plain dicts (old format)
         if origin is list and args and is_dataclass(args[0]) and isinstance(val, list):
-            item_cls = args[0]
+            item_cls: Any = args[0]
             repaired[field_name] = [
                 item_cls(**item) if isinstance(item, dict) and not _is_new_model_tag(item) else item
                 for item in val
             ]
         # SomeDC directly (non-list)
         elif is_dataclass(hint) and isinstance(val, dict) and not _is_new_model_tag(val):
-            repaired[field_name] = hint(**val)
+            dataclass_type: Any = hint
+            repaired[field_name] = dataclass_type(**val)
     return repaired
 
 

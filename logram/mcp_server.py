@@ -434,7 +434,8 @@ def get_step_source(logic_hash: str) -> str:
             )
 
         globals_obj = _parse_json(row["resolved_globals"])
-        callees     = _parse_json(row["called_functions_json"]) or {}
+        parsed_callees = _parse_json(row["called_functions_json"])
+        callees = parsed_callees if isinstance(parsed_callees, dict) else {}
 
         lines = [
             f"## Logic Snapshot — `{logic_hash[:16]}…`",

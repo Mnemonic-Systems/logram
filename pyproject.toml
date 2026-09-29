@@ -44,6 +44,7 @@ server = [
 all = ["logram-sdk[mcp,server]"]
 dev = [
     "logram-sdk[all]",
+    "mypy>=1.10",
     "pytest>=8.0",
     "ruff>=0.6",
 ]
@@ -65,6 +66,11 @@ exclude = ["**/.DS_Store"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["logram"]
+ignore_missing_imports = true
 
 [tool.ruff]
 target-version = "py310"

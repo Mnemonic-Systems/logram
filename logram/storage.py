@@ -971,10 +971,11 @@ class TraceStorage:
 
                 self._ensure_run_exists(conn, req.run_id, status="running")
 
-                if logic_hash and self._is_meaningful_logic_snapshot(req.logic_snapshot):
-                    source_code = req.logic_snapshot.get("source_normalized", req.logic_snapshot.get("source") or "")
-                    globals_json = req.logic_snapshot.get("resolved_globals", req.logic_snapshot.get("globals") or {})
-                    called_functions = req.logic_snapshot.get("called_functions") or {}
+                snapshot = req.logic_snapshot
+                if logic_hash and snapshot is not None and self._is_meaningful_logic_snapshot(snapshot):
+                    source_code = snapshot.get("source_normalized", snapshot.get("source") or "")
+                    globals_json = snapshot.get("resolved_globals", snapshot.get("globals") or {})
+                    called_functions = snapshot.get("called_functions") or {}
                     conn.execute(
                         """
                         INSERT INTO logic_registry (logic_hash, name, source_code, globals_json, resolved_globals, called_functions_json, signature)
@@ -983,12 +984,12 @@ class TraceStorage:
                         """,
                         (
                             logic_hash,
-                            str(req.logic_snapshot.get("name") or "unknown"),
+                            str(snapshot.get("name") or "unknown"),
                             str(source_code),
                             self._safe_json_dumps(globals_json),
                             self._safe_json_dumps(globals_json),
                             self._safe_json_dumps(called_functions if isinstance(called_functions, dict) else {}),
-                            str(req.logic_snapshot.get("signature") or ""),
+                            str(snapshot.get("signature") or ""),
                         ),
                     )
 

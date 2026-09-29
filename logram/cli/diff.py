@@ -94,7 +94,7 @@ def diff(
             console.print()
             console.print(Panel(Text("Provide two run_ids, use 'last' alone, or use --ss.", style="lg.muted"), box=PANEL_BOX, border_style="lg.muted", padding=(0, 2)))
             raise typer.Exit(1)
-        elif run_a is None:
+        elif run_a is None or run_b is None:
             console.print()
             console.print(Panel(Text("Usage: lg diff last  ·  lg diff --ss  ·  lg diff <run_a> <run_b>", style="lg.muted"), box=PANEL_BOX, border_style="lg.muted", padding=(0, 2)))
             raise typer.Exit(1)

@@ -22,7 +22,7 @@ from typing import Any, Callable, Union, get_args, get_origin, get_type_hints
 
 from .context import _is_forced_by_flow, current_input_id, current_run_id, current_step_id
 from .oracle import clear_oracle_cache, compute_logic_fingerprint, snapshot_digest
-from .serializer import BlobManager, ensure_serializable, rehydrate_logram_output
+from .serializer import BlobManager, _construct_pydantic, ensure_serializable, rehydrate_logram_output
 from .storage import _VCR_MISS, TraceStorage
 
 log = logging.getLogger(__name__)
@@ -273,12 +273,6 @@ def _is_constructible_model(cls: Any) -> bool:
     return isinstance(cls, type) and (hasattr(cls, "model_validate") or hasattr(cls, "parse_obj"))
 
 
-def _construct_model(model_cls: type, data: Any) -> Any:
-    if hasattr(model_cls, "model_validate"):
-        return model_cls.model_validate(data)
-    return model_cls.parse_obj(data)
-
-
 def _rehydrate_cached(func, cached_res: Any) -> Any:
     out = rehydrate_logram_output(cached_res)
 
@@ -297,14 +291,14 @@ def _rehydrate_cached(func, cached_res: Any) -> Any:
         item_t = type_args[0]
         if isinstance(out, list) and _is_constructible_model(item_t):
             try:
-                return [_construct_model(item_t, item) for item in out]
+                return [_construct_pydantic(item_t, item) for item in out]
             except Exception:
                 return out
         return out
 
     if _is_constructible_model(rt) and isinstance(out, dict):
         try:
-            return _construct_model(rt, out)
+            return _construct_pydantic(rt, out)
         except Exception:
             return out
 
@@ -351,7 +345,7 @@ def _rehydrate_cached_gen(func, cached_res: Any) -> list[Any]:
 
     try:
         return [
-            _construct_model(item_t, item) if isinstance(item, dict) else item
+            _construct_pydantic(item_t, item) if isinstance(item, dict) else item
             for item in items
         ]
     except Exception:
