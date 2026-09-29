@@ -368,7 +368,7 @@ def _detect_mime(path: Path) -> str:
 
 async def _open_ro_connection(state: LogramServerState) -> aiosqlite.Connection:
     if not state.db_path.exists():
-        raise FileNotFoundError(f"Base SQLite introuvable: {state.db_path}")
+        raise FileNotFoundError(f"SQLite database not found: {state.db_path}")
 
     try:
         conn = await aiosqlite.connect(state.db_uri, uri=True)
@@ -382,7 +382,7 @@ async def _open_ro_connection(state: LogramServerState) -> aiosqlite.Connection:
             pass
         row = await (await conn.execute("PRAGMA journal_mode;")).fetchone()
         if row and str(row[0]).lower() != "wal":
-            LOG.warning("SQLite journal_mode=%s (WAL recommandé)", row[0])
+            LOG.warning("SQLite journal_mode=%s (WAL recommended)", row[0])
         return conn
     except aiosqlite.Error as exc:
         raise LogramDBError(str(exc)) from exc
@@ -461,7 +461,7 @@ def create_app(*, db_path: Path | None = None, assets_dir: Path | None = None) -
 
     @fastapi_app.exception_handler(LogramDBError)
     async def db_error_handler(_: Request, exc: LogramDBError) -> JSONResponse:
-        return JSONResponse(status_code=500, content={"detail": f"Erreur SQLite: {exc}"})
+        return JSONResponse(status_code=500, content={"detail": f"SQLite error: {exc}"})
 
     @fastapi_app.get("/health")
     async def health() -> dict[str, str]:
@@ -573,7 +573,7 @@ def create_app(*, db_path: Path | None = None, assets_dir: Path | None = None) -
         try:
             exists = await (await conn.execute("SELECT 1 FROM runs WHERE run_id = ? LIMIT 1", (run_id,))).fetchone()
             if not exists:
-                raise HTTPException(status_code=404, detail=f"Run introuvable: {run_id}")
+                raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
 
             cursor = await conn.execute(
                 """
@@ -609,7 +609,7 @@ def create_app(*, db_path: Path | None = None, assets_dir: Path | None = None) -
         try:
             exists = await (await conn.execute("SELECT 1 FROM runs WHERE run_id = ? LIMIT 1", (run_id,))).fetchone()
             if not exists:
-                raise HTTPException(status_code=404, detail=f"Run introuvable: {run_id}")
+                raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
 
             cursor = await conn.execute(
                 """
@@ -711,7 +711,7 @@ def create_app(*, db_path: Path | None = None, assets_dir: Path | None = None) -
                 )
             ).fetchone()
             if not focus:
-                raise HTTPException(status_code=404, detail=f"Run introuvable: {run_id}")
+                raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
 
             project = focus["project"]
             input_id = focus["input_id"]
@@ -837,7 +837,7 @@ def create_app(*, db_path: Path | None = None, assets_dir: Path | None = None) -
             )
             row = await cursor.fetchone()
             if not row:
-                raise HTTPException(status_code=404, detail=f"Step introuvable: {step_id}")
+                raise HTTPException(status_code=404, detail=f"Step not found: {step_id}")
 
             return StepDetail(
                 step_id=str(row["step_id"]),
@@ -868,7 +868,7 @@ def create_app(*, db_path: Path | None = None, assets_dir: Path | None = None) -
         state: LogramServerState = fastapi_app.state.logram
         blob_path = _resolve_blob_path(state.assets_dir, blob_hash)
         if blob_path is None:
-            raise HTTPException(status_code=404, detail=f"Asset introuvable pour hash: {blob_hash}")
+            raise HTTPException(status_code=404, detail=f"No asset for hash: {blob_hash}")
 
         media_type = _detect_mime(blob_path)
         return FileResponse(path=blob_path, media_type=media_type, filename=blob_path.name)
@@ -883,7 +883,7 @@ def create_app(*, db_path: Path | None = None, assets_dir: Path | None = None) -
                     await conn.execute("SELECT 1 FROM runs WHERE run_id = ? LIMIT 1", (rid,))
                 ).fetchone()
                 if not row:
-                    raise HTTPException(status_code=404, detail=f"Run introuvable: {rid}")
+                    raise HTTPException(status_code=404, detail=f"Run not found: {rid}")
 
             step_rows = await (
                 await conn.execute(
@@ -1069,7 +1069,7 @@ def create_app(*, db_path: Path | None = None, assets_dir: Path | None = None) -
             for rid in (run_id_a, run_id_b):
                 row = await (await conn.execute("SELECT 1 FROM runs WHERE run_id = ? LIMIT 1", (rid,))).fetchone()
                 if not row:
-                    raise HTTPException(status_code=404, detail=f"Run introuvable: {rid}")
+                    raise HTTPException(status_code=404, detail=f"Run not found: {rid}")
 
             cursor = await conn.execute(
                 """

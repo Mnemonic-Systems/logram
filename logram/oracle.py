@@ -88,7 +88,7 @@ _AST_FIELDS_IGNORE = frozenset({
     "lineno", "col_offset", "end_lineno", "end_col_offset",
 })
 
-# Module-level memoization. Keyed by id(unwrapped_func). Cleared at af.init().
+# Module-level memoization. Keyed by id(unwrapped_func). Cleared by logram.init().
 _FUNCTION_HASH_CACHE: dict[int, str] = {}
 _FUNCTION_SNAPSHOT_CACHE: weakref.WeakValueDictionary[int, dict] = weakref.WeakValueDictionary()
 _AST_TREE_CACHE: weakref.WeakValueDictionary[int, ast.AST] = weakref.WeakValueDictionary()

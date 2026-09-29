@@ -36,21 +36,20 @@ def get_semantic_version() -> str:
         if not commit:
             return "unknown_version"
 
-        # 1. Obtenir le diff en EXCLUANT explicitement .logram
-        # La syntaxe ':!.logram' dit à git d'ignorer ce chemin
+        # 1. Diff against HEAD, excluding .logram
+        # ':!.logram' tells git to ignore that path
         diff_text = _run_git(["diff", "HEAD", "--", ".", ":!.logram"], cwd=repo_root_str)
         combined = diff_text.encode("utf-8", errors="replace")
 
-        # 2. Obtenir le status pour les fichiers untracked
+        # 2. Status, for untracked files
         status = _run_git(["status", "--porcelain"], cwd=repo_root_str)
 
         has_real_changes = len(diff_text.strip()) > 0
 
-        # 3. Filtrer les fichiers untracked
+        # 3. Hash untracked files (except .logram)
         for line in status.splitlines():
             if not line.startswith("?? "):
-                # Si c'est un fichier modifié (M) déjà capturé par git diff,
-                # on marque juste qu'il y a des changements
+                # Modified files are already in the diff above; just flag the change.
                 if not line.startswith("??"):
                     has_real_changes = True
                 continue

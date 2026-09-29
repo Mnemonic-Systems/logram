@@ -158,8 +158,8 @@ class TraceStorage:
                 conn.close()
             if count > 0:
                 print(
-                    f"[LOGRAM] {count} step(s) en cache — "
-                    "relance avec 'logram replay <script>.py' pour activer le Time-Travel."
+                    f"[LOGRAM] {count} step(s) cached — "
+                    "rerun with 'logram replay <script>.py' to replay them."
                 )
         except Exception:
             pass

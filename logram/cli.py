@@ -60,14 +60,14 @@ _GITIGNORE_ENTRIES = [".logram/", ".logram_assets/"]
 
 app = typer.Typer(
     name="logram",
-    help="CLI Logram: inspection, time-machine, qualité et maintenance.",
+    help="Inspect, replay, diff and maintain Logram traces.",
     no_args_is_help=True,
     rich_markup_mode="rich",
 )
-golden_app = typer.Typer(help="Gestion des runs Golden.")
+golden_app = typer.Typer(help="Manage golden (reference) runs.")
 app.add_typer(golden_app, name="golden")
 
-mcp_app = typer.Typer(help="Serveur MCP Logram pour agents de coding (Claude, Cursor…).")
+mcp_app = typer.Typer(help="MCP server for coding agents (Claude, Cursor…).")
 app.add_typer(mcp_app, name="mcp")
 
 
@@ -378,7 +378,7 @@ def _unified_diff_text(a: str, b: str, from_label: str, to_label: str) -> str:
             lineterm="",
         )
     )
-    return "\n".join(lines) if lines else "(aucune différence)"
+    return "\n".join(lines) if lines else "(no differences)"
 
 
 def _unified_diff_text_ctx(a: str, b: str, from_label: str, to_label: str, context: int = 3) -> str:
@@ -460,8 +460,8 @@ def _render_text_or_json_diff(
         paths_b = _collect_multiline_text_paths(value_b)
         all_paths = sorted(set(paths_a) | set(paths_b))
         for path in all_paths:
-            text_a = paths_a[path] if path in paths_a else "<Variable non capturée>"
-            text_b = paths_b[path] if path in paths_b else "<Variable non capturée>"
+            text_a = paths_a[path] if path in paths_a else "<not captured>"
+            text_b = paths_b[path] if path in paths_b else "<not captured>"
 
             diff_text = _unified_diff_text_ctx(
                 text_a,
@@ -475,8 +475,8 @@ def _render_text_or_json_diff(
                 printed = True
         return printed
 
-    text_a = "<Variable non capturée>" if _is_missing_capture(value_a) else _json_text(value_a)
-    text_b = "<Variable non capturée>" if _is_missing_capture(value_b) else _json_text(value_b)
+    text_a = "<not captured>" if _is_missing_capture(value_a) else _json_text(value_a)
+    text_b = "<not captured>" if _is_missing_capture(value_b) else _json_text(value_b)
     diff_text = _unified_diff_text_ctx(
         text_a,
         text_b,
@@ -653,17 +653,17 @@ def _complete_run_id(incomplete: str) -> list[tuple[str, str]]:
 
 @app.command("list")
 def list_runs(
-    group_by_input: bool = typer.Option(False, "--group-by-input", help="Regrouper les runs par input_id."),
+    group_by_input: bool = typer.Option(False, "--group-by-input", help="Group runs by input_id."),
     project: str | None = typer.Option(None, "--project", help="Filtrer par projet."),
-    full: bool = typer.Option(False, "--full", help="Afficher les champs complets (pas d'ellipsis)."),
+    full: bool = typer.Option(False, "--full", help="Show full field values (no ellipsis)."),
     copy_field: str | None = typer.Option(
         None,
         "--copy-field",
-        help="Copier un champ d'une ligne (run_id|project|input_id|version_id|status|duration|created_at).",
+        help="Copy one field of a row to the clipboard (run_id|project|input_id|version_id|status|duration|created_at).",
     ),
-    copy_index: int = typer.Option(1, "--copy-index", min=1, help="Index de ligne (1 = première ligne)."),
+    copy_index: int = typer.Option(1, "--copy-index", min=1, help="Row index for --copy-field (1 = first row)."),
 ) -> None:
-    """Affiche les runs historisés."""
+    """List recorded runs."""
     conn = _connect_db()
     if conn is None:
         raise typer.Exit(1)
@@ -867,7 +867,7 @@ def list_runs(
 
 @app.command(context_settings=_RUN_ID_ARG_SETTINGS)
 def inspect(run_id: str = typer.Argument(..., autocompletion=_complete_run_id)) -> None:
-    """Affiche l'arbre chronologique d'exécution d'un run. Accepte: last, fail, -1, -2…"""
+    """Show the step tree of a run. Accepts: last, fail, -1, -2…"""
     conn = _connect_db()
     if conn is None:
         raise typer.Exit(1)
@@ -993,7 +993,7 @@ def inspect(run_id: str = typer.Argument(..., autocompletion=_complete_run_id)) 
 
 @app.command()
 def view(step_id: str) -> None:
-    """Affiche le détail d'une étape (inputs, outputs JSON, blobs)."""
+    """Show one step: inputs, output, error and blobs."""
     conn = _connect_db()
     if conn is None:
         raise typer.Exit(1)
@@ -1113,10 +1113,10 @@ def view(step_id: str) -> None:
 @app.command()
 def replay(
     script_py: str,
-    force: list[str] | None = typer.Option(None, "--force", "-f", help="Step(s) à forcer en LIVE (répétable: --force a --force b)."),
-    from_step: str | None = typer.Option(None, "--from", help="Cascade LIVE depuis cette étape (toutes les étapes descendantes → LIVE)."),
+    force: list[str] | None = typer.Option(None, "--force", "-f", help="Step(s) to force live (repeatable: --force a --force b)."),
+    from_step: str | None = typer.Option(None, "--from", help="Run this step and every later step live."),
 ) -> None:
-    """Relance un script en mode replay (LOGRAM_REPLAY=true)."""
+    """Rerun a script in replay mode (LOGRAM_REPLAY=true)."""
     conn = _connect_db(require_exists=False)
     if conn is None:
         raise typer.Exit(1)
@@ -1220,13 +1220,13 @@ def replay(
 def diff(
     run_a: str | None = typer.Argument(None, autocompletion=_complete_run_id),
     run_b: str | None = typer.Argument(None, autocompletion=_complete_run_id),
-    ss: bool = typer.Option(False, "--ss", help="Comparer le dernier run avec le dernier SUCCESS (même input_id)."),
-    code: bool = typer.Option(False, "--code", "-c", help="Afficher uniquement le diff du code source."),
-    globals_only: bool = typer.Option(False, "--globals", "-g", help="Afficher uniquement le diff des globals/prompts."),
-    inputs: bool = typer.Option(False, "--inputs", "-i", help="Afficher uniquement le diff des inputs."),
-    outputs: bool = typer.Option(False, "--outputs", "-o", help="Afficher uniquement le diff des outputs."),
+    ss: bool = typer.Option(False, "--ss", help="Compare the last run with the last successful run on the same input_id."),
+    code: bool = typer.Option(False, "--code", "-c", help="Only show source code differences."),
+    globals_only: bool = typer.Option(False, "--globals", "-g", help="Only show globals/prompt differences."),
+    inputs: bool = typer.Option(False, "--inputs", "-i", help="Only show input differences."),
+    outputs: bool = typer.Option(False, "--outputs", "-o", help="Only show output differences."),
 ) -> None:
-    """Compare deux runs (code + data). Raccourcis: last, fail, -1… · --ss: dernier run vs dernier SUCCESS."""
+    """Compare two runs (code, globals, inputs, outputs). Accepts: last, fail, -1… · --ss: last run vs last success."""
     conn = _connect_db()
     if conn is None:
         raise typer.Exit(1)
@@ -1565,7 +1565,7 @@ def diff(
 
 @app.command()
 def recover(logic_hash: str) -> None:
-    """Affiche le code source exact et les globals d'un logic_hash."""
+    """Show the exact source code and globals recorded for a logic_hash."""
     conn = _connect_db()
     if conn is None:
         raise typer.Exit(1)
@@ -1631,7 +1631,7 @@ def recover(logic_hash: str) -> None:
 
 @app.command(context_settings=_RUN_ID_ARG_SETTINGS)
 def restore(run_id: str = typer.Argument(..., autocompletion=_complete_run_id)) -> None:
-    """MVP anti-erreur: affiche les blocs de code à recopier pour revenir à l'état d'un run. Accepte: last, fail, -1…"""
+    """Print the code and constants of a run as blocks to copy back. Accepts: last, fail, -1…"""
     conn = _connect_db()
     if conn is None:
         raise typer.Exit(1)
@@ -1708,7 +1708,7 @@ def restore(run_id: str = typer.Argument(..., autocompletion=_complete_run_id)) 
 
 @app.command("open")
 def open_step(step_id: str) -> None:
-    """Ouvre automatiquement un blob image d'une étape (si présent)."""
+    """Open a step's image blob in the system viewer."""
     conn = _connect_db()
     if conn is None:
         raise typer.Exit(1)
@@ -1756,13 +1756,13 @@ def open_step(step_id: str) -> None:
 
 @app.command()
 def ui(
-    host: str = typer.Option("127.0.0.1", "--host", help="Host de binding du serveur API"),
-    port: int = typer.Option(8000, "--port", min=1, max=65535, help="Port du serveur API"),
+    host: str = typer.Option("127.0.0.1", "--host", help="Address the API server binds to."),
+    port: int = typer.Option(8000, "--port", min=1, max=65535, help="API server port."),
     dashboard_url: str = typer.Option("http://localhost:3000", "--dashboard-url", help="URL du dashboard web"),
-    open_browser: bool = typer.Option(True, "--open-browser/--no-open-browser", help="Ouvre automatiquement le dashboard"),
+    open_browser: bool = typer.Option(True, "--open-browser/--no-open-browser", help="Open the dashboard in a browser."),
     reload: bool = typer.Option(False, "--reload", help="Active l'auto-reload (dev uniquement)"),
 ) -> None:
-    """Lance le serveur FastAPI Logram (read API) pour le dashboard web."""
+    """Start the read-only API server used by the web dashboard."""
     if not DB_PATH.exists():
         _educational_db_missing_message()
         raise typer.Exit(1)
@@ -1809,7 +1809,7 @@ def ui(
 
 @golden_app.command("add")
 def golden_add(run_id: str) -> None:
-    """Tag un run en GOLDEN."""
+    """Tag a run as a golden (reference) run."""
     conn = _connect_db()
     if conn is None:
         raise typer.Exit(1)
@@ -1849,7 +1849,7 @@ def golden_add(run_id: str) -> None:
 
 @app.command()
 def test(script_py: str) -> None:
-    """Relance un script sur tous les inputs GOLDEN et génère un rapport de régression."""
+    """Replay a script on every golden input and report regressions (exit 1 on any)."""
     conn = _connect_db()
     if conn is None:
         raise typer.Exit(1)
@@ -1990,12 +1990,12 @@ def test(script_py: str) -> None:
 @app.command(context_settings=_RUN_ID_ARG_SETTINGS)
 def stats(
     run_id_arg: str | None = typer.Argument(None, metavar="[RUN_ID]", autocompletion=_complete_run_id),
-    run_id: str | None = typer.Option(None, "--run-id", help="Scope Run: stats d'un run précis."),
-    project: str | None = typer.Option(None, "--project", help="Scope Projet: filtre sur le nom de projet/pipeline."),
-    input_id: str | None = typer.Option(None, "--input-id", help="Scope Input: filtre sur un document précis."),
-    hourly_rate: float = typer.Option(10.0, "--hourly-rate", min=0.0, help="TJM horaire pour estimer le gain financier."),
+    run_id: str | None = typer.Option(None, "--run-id", help="Stats for one run."),
+    project: str | None = typer.Option(None, "--project", help="Only runs of this project."),
+    input_id: str | None = typer.Option(None, "--input-id", help="Only runs on this input_id."),
+    hourly_rate: float = typer.Option(10.0, "--hourly-rate", min=0.0, help="Hourly rate used to value the time saved."),
 ) -> None:
-    """Tableau de bord ROI avec scopes Global / Projet / Input / Run."""
+    """Time, tokens and cost saved by replay (global, per project, input or run)."""
     conn = _connect_db()
     if conn is None:
         raise typer.Exit(1)
@@ -2196,7 +2196,7 @@ def stats(
 
 @app.command()
 def clean() -> None:
-    """Propose le nettoyage des runs échoués et assets orphelins."""
+    """Offer to delete failed runs and unreferenced blobs."""
     conn = _connect_db()
     if conn is None:
         raise typer.Exit(1)
@@ -2255,7 +2255,7 @@ def clean() -> None:
 
 @app.command()
 def doctor() -> None:
-    """Vérifie la santé de l'environnement Logram : Python, stockage, agents MCP, nettoyage."""
+    """Check the environment: Python, store, MCP wiring, pending cleanup."""
     rows: list[tuple[str, Text, str]] = []
 
     def _ok() -> Text:
@@ -2306,7 +2306,7 @@ def doctor() -> None:
     else:
         rows.append(("logram.db", _fail(), "not found — run your pipeline first"))
 
-    # --- Intégration Agent : Claude Code ---
+    # --- Agent integration: Claude Code ---
     claude_bin = shutil.which("claude")
     if claude_bin:
         claude_json = Path.home() / ".claude.json"
@@ -2324,7 +2324,7 @@ def doctor() -> None:
     else:
         rows.append(("Claude Code MCP", _na(), "claude CLI not found in PATH"))
 
-    # --- Intégration Agent : Claude Desktop ---
+    # --- Agent integration: Claude Desktop ---
     desktop_path = _claude_desktop_config_path()
     if desktop_path and desktop_path.exists():
         try:
@@ -2340,7 +2340,7 @@ def doctor() -> None:
     else:
         rows.append(("Claude Desktop MCP", _na(), "not supported on this platform"))
 
-    # --- Intégration Agent : Cursor ---
+    # --- Agent integration: Cursor ---
     cursor_mcp: Path | None = None
     for candidate in [Path.cwd(), *list(Path.cwd().parents)[:3]]:
         p = candidate / ".cursor" / "mcp.json"
@@ -2415,9 +2415,9 @@ def doctor() -> None:
 
 @app.command()
 def live(
-    interval: int = typer.Option(500, "--interval", min=100, help="Intervalle de polling en millisecondes (défaut: 500)."),
+    interval: int = typer.Option(500, "--interval", min=100, help="Polling interval in milliseconds."),
 ) -> None:
-    """Dashboard temps réel du run en cours, avec arbre partiel + spinner (polling à 500ms)."""
+    """Live step tree of the running pipeline (polls the store)."""
     from rich.console import Group
     from rich.live import Live
 
@@ -2538,10 +2538,10 @@ def live(
 @mcp_app.command("start")
 def mcp_start(
     db_path: str | None = typer.Option(
-        None, "--db-path", help="Chemin vers logram.db (défaut: LOGRAM_DB_PATH ou .logram/logram.db)."
+        None, "--db-path", help="Path to logram.db (default: LOGRAM_DB_PATH or <project>/.logram/logram.db)."
     ),
 ) -> None:
-    """Lance le serveur MCP Logram en mode stdio (pour Claude Desktop ou Cursor)."""
+    """Start the MCP server on stdio (for Claude Code, Claude Desktop or Cursor)."""
     if db_path:
         os.environ["LOGRAM_DB_PATH"] = db_path
 
@@ -2578,10 +2578,10 @@ def mcp_start(
 @mcp_app.command("config")
 def mcp_config(
     db_path: str | None = typer.Option(
-        None, "--db-path", help="Chemin absolu vers logram.db à inclure dans la config."
+        None, "--db-path", help="Absolute path to logram.db to put in the config."
     ),
 ) -> None:
-    """Affiche le bloc JSON à copier dans Cursor (Settings › MCP) ou Claude Desktop."""
+    """Print the JSON block to add to Cursor (Settings › MCP) or Claude Desktop."""
     python_bin = sys.executable
     effective_db = db_path or str(resolve_db_path())
 
@@ -2885,10 +2885,10 @@ _MCP_TOOLS = [
 @mcp_app.command("install")
 def mcp_install(
     db_path: str | None = typer.Option(
-        None, "--db-path", help="Chemin absolu vers logram.db (défaut: LOGRAM_DB_PATH ou .logram/logram.db)."
+        None, "--db-path", help="Absolute path to logram.db (default: LOGRAM_DB_PATH or <project>/.logram/logram.db)."
     ),
 ) -> None:
-    """Installe automatiquement le serveur MCP Logram dans les agents de coding détectés."""
+    """Register the MCP server with the coding agents found on this machine."""
     import shutil as _shutil
 
     if db_path:

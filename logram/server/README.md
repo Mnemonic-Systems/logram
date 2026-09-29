@@ -1,39 +1,35 @@
-# Logram Dashboard Read API
+# Logram dashboard API
 
-Serveur FastAPI de lecture pour le dashboard web.
+Read-only FastAPI server behind the web dashboard. Install it with `pip install "logram-sdk[server]"`.
 
-## Objectif
-
-- Exposer les données de `.logram/logram.db` **en lecture seule**.
-- Servir les blobs depuis `.logram_assets/` de manière sécurisée.
-- Fournir des endpoints rapides pour navigation, graphe React Flow, comparaison A/B et stats ROI.
+- Serves the trace store (`.logram/logram.db`) **read-only**.
+- Serves blobs from `.logram_assets/`, by content hash only.
+- Provides the endpoints the dashboard needs: navigation, step graph, A/B comparison and stats.
 
 ## Endpoints
 
+- `GET /health`
 - `GET /api/projects`
 - `GET /api/inputs?project=...`
 - `GET /api/runs?input_id=...&limit=...&offset=...`
+- `GET /api/runs/{run_id}/steps`
 - `GET /api/runs/{run_id}/graph`
+- `GET /api/runs/{run_id}/lineage`
 - `GET /api/steps/{step_id}`
 - `GET /api/assets/{blob_hash}`
+- `GET /api/diff/{run_id_a}/{run_id_b}`
 - `GET /api/compare/{run_id_a}/{run_id_b}`
 - `GET /api/stats?project=...`
 
-## Lancement
+## Running it
 
-Depuis la CLI Logram:
+```bash
+logram ui            # API on http://127.0.0.1:8000, dashboard expected on http://localhost:3000
+```
 
-- `af ui`
+## Safety
 
-Par défaut:
-
-- API: `http://127.0.0.1:8000`
-- Dashboard web attendu: `http://localhost:3000`
-
-## Robustesse
-
-- Connexion SQLite `mode=ro` + `cache=shared`
-- `PRAGMA query_only=ON`
-- CORS activé pour `localhost:3000`
-- Logs de chaque requête (méthode, path, status, latence)
-- Erreurs SQL transformées en réponses HTTP propres (`404` / `500`)
+- SQLite opened with `mode=ro` and `PRAGMA query_only=ON`.
+- CORS limited to `localhost:3000` / `localhost:3001`.
+- Every request is logged (method, path, status, latency).
+- SQLite errors become clean `404` / `500` responses.
