@@ -23,7 +23,7 @@ from ..theme import (
     TABLE_BOX,
     console,
 )
-from ._app import mcp_app
+from ._app import install_hint, mcp_app
 from ._common import (
     _PACKAGE_DIR,
     _claude_desktop_config_path,
@@ -61,7 +61,7 @@ def mcp_start(
                 Text.assemble(
                     ("fastmcp not installed: ", "lg.muted"),
                     (str(exc), "lg.error"),
-                    ("\n\npip install \"logram-sdk[mcp]\"", "lg.brand"),
+                    ("\n\n" + install_hint("mcp"), "lg.brand"),
                 ),
                 box=PANEL_BOX,
                 border_style="lg.error",
@@ -279,7 +279,7 @@ def mcp_install(
             Panel(
                 Text.assemble(
                     ("fastmcp not installed.\n\n", "bold lg.error"),
-                    ("pip install \"logram-sdk[mcp]\"", "lg.brand"),
+                    (install_hint("mcp"), "lg.brand"),
                 ),
                 box=PANEL_BOX,
                 border_style="lg.error",

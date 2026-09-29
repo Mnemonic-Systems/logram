@@ -201,3 +201,9 @@ def test_diff_last_reads_from_previous_to_latest(cli_paths: Path) -> None:
     assert result.exit_code == 0, result.output
     assert '-  "PROMPT": "old"' in result.output
     assert '+  "PROMPT": "new"' in result.output
+
+
+def test_version_flag(cli_paths: Path) -> None:
+    result = CliRunner().invoke(cli.app, ["--version"])
+    assert result.exit_code == 0
+    assert result.output.strip() == f"logram {logram.__version__}"
