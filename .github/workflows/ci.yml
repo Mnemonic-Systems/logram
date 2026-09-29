@@ -30,3 +30,21 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[dev]"
       - run: pytest -q
+
+  package:
+    # Install the built wheel without extras, outside the source tree, to catch
+    # undeclared dependencies and missing package data.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build
+      - run: python -m build
+      - run: |
+          python -m venv /tmp/core
+          /tmp/core/bin/pip install dist/*.whl
+          cd /tmp && /tmp/core/bin/logram --help
+          FAKE_LLM_LATENCY=0 /tmp/core/bin/python "$GITHUB_WORKSPACE/examples/invoice_pipeline.py"
+          LOGRAM_REPLAY=true FAKE_LLM_LATENCY=0 /tmp/core/bin/python "$GITHUB_WORKSPACE/examples/invoice_pipeline.py"

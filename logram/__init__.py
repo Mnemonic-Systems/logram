@@ -12,7 +12,7 @@ from .decorators import clear_logic_snapshot_cache, stateful, storage, trace
 from .serializer import rehydrate_logram_output
 from .versioning import get_semantic_version
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 
 def set_run_id(run_id: str, *, verbose: bool = False) -> str:

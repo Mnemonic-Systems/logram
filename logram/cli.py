@@ -21,7 +21,6 @@ from pathlib import Path
 from typing import Any
 
 import typer
-from click.shell_completion import CompletionItem as _CompletionItem
 from rich.panel import Panel
 from rich.progress_bar import ProgressBar
 from rich.syntax import Syntax
@@ -612,12 +611,10 @@ _SHORTHAND_COMPLETIONS: list[tuple[str, str]] = [
 ]
 
 
-def _complete_run_id(ctx: typer.Context, param: typer.CallbackParam, incomplete: str) -> list[_CompletionItem]:
-    """Shell completion callback: shorthands + real run_ids from the DB."""
-    completions: list[_CompletionItem] = [
-        _CompletionItem(token, help=desc)
-        for token, desc in _SHORTHAND_COMPLETIONS
-        if token.startswith(incomplete)
+def _complete_run_id(incomplete: str) -> list[tuple[str, str]]:
+    """Shell completion callback: shorthands + real run_ids from the DB, as (value, help)."""
+    completions: list[tuple[str, str]] = [
+        (token, desc) for token, desc in _SHORTHAND_COMPLETIONS if token.startswith(incomplete)
     ]
     if not DB_PATH.exists():
         return completions
@@ -631,7 +628,7 @@ def _complete_run_id(ctx: typer.Context, param: typer.CallbackParam, incomplete:
             ).fetchall()
             for row in rows:
                 help_text = f"{row['project'] or '-'} · {row['status'] or '?'} · {_relative_time(row['created_at'])}"
-                completions.append(_CompletionItem(row["run_id"], help=help_text))
+                completions.append((row["run_id"], help_text))
         finally:
             conn.close()
     except Exception:
@@ -859,7 +856,7 @@ def list_runs(
 
 
 @app.command()
-def inspect(run_id: str = typer.Argument(..., shell_complete=_complete_run_id)) -> None:
+def inspect(run_id: str = typer.Argument(..., autocompletion=_complete_run_id)) -> None:
     """Affiche l'arbre chronologique d'exécution d'un run. Accepte: last, fail, -1, -2…"""
     conn = _connect_db()
     if conn is None:
@@ -1209,8 +1206,8 @@ def replay(
 
 @app.command()
 def diff(
-    run_a: str | None = typer.Argument(None, shell_complete=_complete_run_id),
-    run_b: str | None = typer.Argument(None, shell_complete=_complete_run_id),
+    run_a: str | None = typer.Argument(None, autocompletion=_complete_run_id),
+    run_b: str | None = typer.Argument(None, autocompletion=_complete_run_id),
     ss: bool = typer.Option(False, "--ss", help="Comparer le dernier run avec le dernier SUCCESS (même input_id)."),
     code: bool = typer.Option(False, "--code", "-c", help="Afficher uniquement le diff du code source."),
     globals_only: bool = typer.Option(False, "--globals", "-g", help="Afficher uniquement le diff des globals/prompts."),
@@ -1621,7 +1618,7 @@ def recover(logic_hash: str) -> None:
 
 
 @app.command()
-def restore(run_id: str = typer.Argument(..., shell_complete=_complete_run_id)) -> None:
+def restore(run_id: str = typer.Argument(..., autocompletion=_complete_run_id)) -> None:
     """MVP anti-erreur: affiche les blocs de code à recopier pour revenir à l'état d'un run. Accepte: last, fail, -1…"""
     conn = _connect_db()
     if conn is None:
@@ -1764,7 +1761,11 @@ def ui(
         console.print()
         console.print(
             Panel(
-                Text.assemble(("uvicorn not available: ", "lg.muted"), (str(exc), "lg.error")),
+                Text.assemble(
+                    ("uvicorn not available: ", "lg.muted"),
+                    (str(exc), "lg.error"),
+                    ("\n\npip install \"logram-sdk[server]\"", "lg.brand"),
+                ),
                 box=PANEL_BOX,
                 border_style="lg.error",
                 padding=(0, 2),
@@ -1976,7 +1977,7 @@ def test(script_py: str) -> None:
 
 @app.command()
 def stats(
-    run_id_arg: str | None = typer.Argument(None, metavar="[RUN_ID]", shell_complete=_complete_run_id),
+    run_id_arg: str | None = typer.Argument(None, metavar="[RUN_ID]", autocompletion=_complete_run_id),
     run_id: str | None = typer.Option(None, "--run-id", help="Scope Run: stats d'un run précis."),
     project: str | None = typer.Option(None, "--project", help="Scope Projet: filtre sur le nom de projet/pipeline."),
     input_id: str | None = typer.Option(None, "--input-id", help="Scope Input: filtre sur un document précis."),
@@ -2263,7 +2264,7 @@ def doctor() -> None:
     rows.append(("Python", _ok() if py >= (3, 10) else _warn(), py_detail + ("" if py >= (3, 10) else " (3.10+ recommended)")))
 
     try:
-        lg_ver = _pkg_version("logram")
+        lg_ver = _pkg_version("logram-sdk")
         rows.append(("Logram SDK", _ok(), lg_ver))
     except Exception:
         rows.append(("Logram SDK", _fail(), "not installed via pip"))
@@ -2550,7 +2551,7 @@ def mcp_start(
                 Text.assemble(
                     ("fastmcp not installed: ", "lg.muted"),
                     (str(exc), "lg.error"),
-                    ("\n\npip install fastmcp", "lg.brand"),
+                    ("\n\npip install \"logram-sdk[mcp]\"", "lg.brand"),
                 ),
                 box=PANEL_BOX,
                 border_style="lg.error",
@@ -2890,7 +2891,7 @@ def mcp_install(
             Panel(
                 Text.assemble(
                     ("fastmcp not installed.\n\n", "bold lg.error"),
-                    ("pip install fastmcp", "lg.brand"),
+                    ("pip install \"logram-sdk[mcp]\"", "lg.brand"),
                 ),
                 box=PANEL_BOX,
                 border_style="lg.error",

@@ -5,6 +5,7 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue?style=flat-square)
 ![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)
 ![Version](https://img.shields.io/badge/version-0.3.0-blueviolet?style=flat-square)
+[![CI](https://github.com/Mnemonic-Systems/logram/actions/workflows/ci.yml/badge.svg)](https://github.com/Mnemonic-Systems/logram/actions/workflows/ci.yml)
 [![Dashboard](https://img.shields.io/badge/Dashboard-waitlist-orange?style=flat-square)](https://logram.dev/waitlist)
 
 Logram records every traced step of a pipeline (inputs, outputs, object state, and the exact code and constants that produced them) in a local store. On the next run, each step is looked up by a fingerprint of its logic and arguments: if nothing relevant changed, the recorded output is replayed; otherwise the step runs live. Editing one prompt at step 97 re-executes only what depends on that edit.
@@ -78,6 +79,9 @@ A decorator-based SDK (`@logram.trace`) that records a pipeline's logic, data fl
 pip install git+https://github.com/Mnemonic-Systems/logram.git
 logram init    # writes agent rule files and updates .gitignore (commit them)
 ```
+
+The MCP server and the dashboard API are optional: install `logram-sdk[mcp]`, `logram-sdk[server]` or `logram-sdk[all]`.
+A runnable pipeline that needs no API key lives in [`examples/`](examples/).
 
 ```python
 import logram
@@ -257,6 +261,7 @@ Coding agents such as Claude and Cursor work from static source files. When a pi
 ### Setup
 
 ```bash
+pip install "logram-sdk[mcp]"
 logram init          # writes the agent rule files below into your project
 logram mcp install   # registers the MCP server with Claude Code, Cursor or Claude Desktop
 logram mcp config    # or print the config block to add manually
@@ -953,4 +958,4 @@ If Logram is useful to you, a star on the repository helps.
 
 ## License
 
-MIT © Logram Contributors
+MIT, see [LICENSE](LICENSE).
