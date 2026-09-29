@@ -68,8 +68,9 @@ def diff(
                 console.print()
                 console.print(Panel(Text("No SUCCESS run found for this input_id.", style="lg.muted"), box=PANEL_BOX, border_style="lg.muted", padding=(0, 2)))
                 raise typer.Exit(1)
-            run_a = _last["run_id"]
-            run_b = _last_success["run_id"]
+            # Baseline on the left: last success → last run.
+            run_a = _last_success["run_id"]
+            run_b = _last["run_id"]
             if run_a == run_b:
                 console.print()
                 console.print(Panel(Text("Last run is already a SUCCESS — nothing to compare with --ss.", style="lg.muted"), box=PANEL_BOX, border_style="lg.muted", padding=(0, 2)))
@@ -88,8 +89,9 @@ def diff(
                 console.print()
                 console.print(Panel(Text("Only one run found for this input_id — nothing to compare.", style="lg.muted"), box=PANEL_BOX, border_style="lg.muted", padding=(0, 2)))
                 raise typer.Exit(1)
-            run_a = _last["run_id"]
-            run_b = _prev["run_id"]
+            # Baseline on the left: previous run → last run.
+            run_a = _prev["run_id"]
+            run_b = _last["run_id"]
         elif run_a is not None and run_b is None:
             console.print()
             console.print(Panel(Text("Provide two run_ids, use 'last' alone, or use --ss.", style="lg.muted"), box=PANEL_BOX, border_style="lg.muted", padding=(0, 2)))

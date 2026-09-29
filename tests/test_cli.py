@@ -157,3 +157,41 @@ def test_inspect_total_counts_nested_steps_once(cli_paths: Path) -> None:
     assert result.exit_code == 0, result.output
     total = float(re.search(r"Total: ([0-9.]+)s", result.output).group(1))
     assert 0.09 <= total < 0.18, result.output
+
+
+PROMPT_PIPELINE = """
+import asyncio
+
+import logram
+
+PROMPT = "{prompt}"
+
+
+@logram.trace()
+def label():
+    return PROMPT
+
+
+async def main():
+    logram.init(project="diff", input_id="doc")
+    print(label())
+    await logram.finalize(status="success")
+
+
+asyncio.run(main())
+"""
+
+
+def test_diff_last_reads_from_previous_to_latest(cli_paths: Path) -> None:
+    from .conftest import run_script
+
+    script = cli_paths / "pipeline.py"
+    script.write_text(PROMPT_PIPELINE.format(prompt="old"))
+    run_script(script)
+    script.write_text(PROMPT_PIPELINE.format(prompt="new"))
+    run_script(script, replay=True)
+
+    result = CliRunner().invoke(cli.app, ["diff", "last", "--globals"])
+    assert result.exit_code == 0, result.output
+    assert '-  "PROMPT": "old"' in result.output
+    assert '+  "PROMPT": "new"' in result.output
